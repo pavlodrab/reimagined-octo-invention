@@ -517,6 +517,10 @@ async function loadConfig() {
         const data = await api('/api/config');
         if (data.success) state.config = { ...state.config, ...data.config };
         document.getElementById('bot-name').textContent = state.config.bot_name || 'Челси Голосование';
+        // Admin-selected font preset propagates to all clients via /api/config.
+        // applyFontPreset sanitizes the value (defaults to 'system' if unknown)
+        // so a malformed config row can't break rendering.
+        applyFontPreset(state.config.font_preset);
     } catch (e) { console.warn('config load failed', e); }
 }
 
@@ -2485,6 +2489,15 @@ function renderSettingsTab() {
     var soundsEnabled = true;
     try { var sv = localStorage.getItem('chelsea_sounds'); soundsEnabled = (sv !== '0' && sv !== 'false'); } catch (e) {}
 
+    // Local user-uploaded background (base64 in localStorage). Read it
+    // here so the markup can render a preview tile if one is set, and
+    // a Reset button to nuke it.
+    var userBg = '';
+    try { userBg = localStorage.getItem('chelsea_user_bg') || ''; } catch (e) {}
+    var bgPreviewHtml = userBg
+        ? `<div class="bg-uploader-preview" style="background-image:url(${JSON.stringify(userBg)})"></div>`
+        : `<div class="bg-uploader-preview bg-uploader-empty">${t('settings.background_empty')}</div>`;
+
     content.innerHTML = `
         <!-- Language -->
         <div class="admin-section">
@@ -2538,13 +2551,15 @@ function renderSettingsTab() {
         <!-- Background -->
         <div class="admin-section">
             <h3>\uD83D\uDDBC\uFE0F ${t('settings.background')}</h3>
-            ${myBg ? `<img src="${myBg}" class="bg-preview" alt="${t('settings.background')}">` : ''}
-            <div class="form-group">
-                <label>${t('settings.background_label')}</label>
-                <input type="text" id="setting-bg-url" placeholder="https://..." value="${myBg}">
+            ${bgPreviewHtml}
+            <div class="bg-uploader">
+                <label class="bg-uploader-pick">
+                    \uD83D\uDCF7 ${t('settings.background_pick')}
+                    <input type="file" accept="image/*" onchange="onBgFileChosen(this)">
+                </label>
+                ${userBg ? `<button class="bg-uploader-clear" onclick="clearLocalBg()">\u2716 ${t('settings.background_clear')}</button>` : ''}
             </div>
-            <button class="btn-primary" onclick="saveBackground()">${t('settings.save')}</button>
-            <div class="player-meta mt-8">${t('settings.background_admin_hint')}</div>
+            <div class="bg-uploader-hint">${t('settings.background_local_hint')}</div>
         </div>
 
         <!-- Config info (public) -->
@@ -2623,6 +2638,110 @@ function setTheme(theme) {
 async function saveBackground() {
     const url = document.getElementById('setting-bg-url').value.trim();
     await saveSetting('background_url', url);
+}
+
+/* ── Local-only background uploader ──────────────────────────────
+   Storage strategy: we read the file via FileReader, downscale + crop
+   in-memory via a hidden canvas (max 1080×1920, JPEG q=0.82), then
+   stash the resulting base64 data URL in localStorage["chelsea_user_bg"].
+   That keeps the payload around 200-500KB which is well under the
+   ~5MB localStorage budget on every browser we care about. The image
+   is applied immediately as a CSS variable on <html>, so users see
+   it without a reload.
+   ──────────────────────────────────────────────────────────────── */
+
+const BG_MAX_W = 1080;          // capped long-edge after downscale
+const BG_MAX_H = 1920;
+const BG_JPEG_QUALITY = 0.82;
+const BG_MAX_BYTES = 600 * 1024; // hard ceiling — refuse if can't compress under
+
+function onBgFileChosen(input) {
+    var file = input && input.files && input.files[0];
+    if (!file) return;
+    if (!/^image\//.test(file.type)) {
+        toast(t('settings.background_invalid'));
+        input.value = '';
+        return;
+    }
+    var reader = new FileReader();
+    reader.onerror = function () {
+        toast(t('common.error'));
+        input.value = '';
+    };
+    reader.onload = function (e) {
+        var img = new Image();
+        img.onload = function () {
+            try {
+                var dataUrl = _resizeImageToDataUrl(img, BG_MAX_W, BG_MAX_H, BG_JPEG_QUALITY);
+                if (dataUrl.length > BG_MAX_BYTES * 1.4 /* base64 overhead */) {
+                    // Try one more pass at lower quality before giving up.
+                    dataUrl = _resizeImageToDataUrl(img, Math.round(BG_MAX_W * 0.8), Math.round(BG_MAX_H * 0.8), 0.7);
+                }
+                localStorage.setItem('chelsea_user_bg', dataUrl);
+                applyLocalBg();
+                toast(t('toast.saved'));
+                renderSettingsTab();
+            } catch (err) {
+                console.warn('bg upload failed', err);
+                toast(t('settings.background_too_large') || t('common.error'));
+            } finally {
+                input.value = '';
+            }
+        };
+        img.onerror = function () {
+            toast(t('common.error'));
+            input.value = '';
+        };
+        img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+}
+
+function _resizeImageToDataUrl(img, maxW, maxH, quality) {
+    // Preserve aspect ratio: shrink so neither dimension exceeds the cap,
+    // but never upscale a small image. iPhone Live Photos / DSLR shots
+    // routinely arrive at 4032×3024 — without this they'd blow past the
+    // localStorage budget.
+    var w = img.naturalWidth || img.width;
+    var h = img.naturalHeight || img.height;
+    var scale = Math.min(1, maxW / w, maxH / h);
+    var dstW = Math.round(w * scale);
+    var dstH = Math.round(h * scale);
+    var canvas = document.createElement('canvas');
+    canvas.width = dstW;
+    canvas.height = dstH;
+    var ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0, dstW, dstH);
+    return canvas.toDataURL('image/jpeg', quality);
+}
+
+function applyLocalBg() {
+    var bg = '';
+    try { bg = localStorage.getItem('chelsea_user_bg') || ''; } catch (e) {}
+    var html = document.documentElement;
+    if (bg) {
+        // Quote the URL so any commas/parens inside the data URL don't
+        // break the CSS parser; data URLs *can* technically contain them.
+        html.style.setProperty('--user-bg', 'url("' + bg.replace(/"/g, '\\"') + '")');
+        html.setAttribute('data-user-bg', '1');
+    } else {
+        html.style.removeProperty('--user-bg');
+        html.removeAttribute('data-user-bg');
+    }
+}
+
+function clearLocalBg() {
+    try { localStorage.removeItem('chelsea_user_bg'); } catch (e) {}
+    applyLocalBg();
+    renderSettingsTab();
+    toast(t('toast.saved'));
+}
+
+/* ── Font preset (admin-controlled, applied to <html>) ──────────── */
+function applyFontPreset(preset) {
+    var allowed = { system: 1, sport: 1, classic: 1, modern: 1 };
+    var p = allowed[preset] ? preset : 'system';
+    document.documentElement.setAttribute('data-font', p);
 }
 
 /* ═══════════════════════════════════════════════════
@@ -2757,6 +2876,21 @@ function renderAdminConfig() {
             <div class="form-group">
                 <label>${t('admin.config.global_bg')}</label>
                 <input type="text" id="cfg-bg" value="${state.config.default_background_url || ''}">
+            </div>
+            <!--
+              Font preset is global: admin picks here, every user gets it on
+              their next /api/config load. The four presets cover system
+              default + three Cyrillic-friendly Google Font pairings.
+            -->
+            <div class="form-group">
+                <label>${t('admin.config.font')}</label>
+                <select id="cfg-font">
+                    <option value="system" ${ (state.config.font_preset || 'system') === 'system' ? 'selected' : '' }>${t('admin.config.font_system')}</option>
+                    <option value="sport"  ${ state.config.font_preset === 'sport'   ? 'selected' : '' }>${t('admin.config.font_sport')}</option>
+                    <option value="classic" ${ state.config.font_preset === 'classic' ? 'selected' : '' }>${t('admin.config.font_classic')}</option>
+                    <option value="modern" ${ state.config.font_preset === 'modern'  ? 'selected' : '' }>${t('admin.config.font_modern')}</option>
+                </select>
+                <div class="player-meta mt-8">${t('admin.config.font_hint')}</div>
             </div>
             <button class="btn-primary" onclick="adminSaveConfig()">\uD83D\uDCBE ${t('admin.config.save')}</button>
         </div>`;
@@ -2962,6 +3096,7 @@ async function adminSaveConfig() {
         max_rating: document.getElementById('cfg-maxrating').value,
         bot_name: document.getElementById('cfg-botname').value,
         default_background_url: document.getElementById('cfg-bg').value,
+        font_preset: document.getElementById('cfg-font').value,
         auto_create_polls: document.getElementById('cfg-auto-create').checked ? '1' : '0',
         auto_close_polls: document.getElementById('cfg-auto-close').checked ? '1' : '0',
         auto_notify: document.getElementById('cfg-auto-notify').checked ? '1' : '0',
@@ -3296,6 +3431,10 @@ async function saveChannelConfig() {
 // Apply saved theme
 const savedTheme = localStorage.getItem('chelsea_theme') || 'dark';
 document.documentElement.setAttribute('data-theme', savedTheme);
+// Apply user's locally-uploaded background (if any) before first paint
+// so they don't see a flash of the default gradient. applyLocalBg is a
+// no-op when localStorage is empty/disabled.
+try { applyLocalBg(); } catch (e) { /* localStorage may be blocked */ }
 
 // Show admin tab if admin
 if (state.isAdmin) {

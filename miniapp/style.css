@@ -11,6 +11,15 @@
     --blue-dark: #022d5c;
     --gold: #DBA111;
     --gold-light: #f0c040;
+    /* ── Font tokens ───────────────────────────────────────────────
+       Defaults match the original system stack so existing screens
+       look unchanged when font preset is "system". When admin picks
+       a different preset (Sport/Classic/Modern), [data-font="..."]
+       blocks below override these two variables and every header /
+       body text picks them up automatically.
+       ─────────────────────────────────────────────────────────── */
+    --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --font-display: var(--font-body);
     --bg: #0a1628;
     --bg-card: #0f1f38;
     --bg-card-hover: #14284a;
@@ -34,7 +43,7 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-family: var(--font-body);
     background: var(--bg);
     color: var(--text);
     min-height: 100vh;
@@ -1241,4 +1250,155 @@ body.app-booting #main          { animation: boot-fade-in 0.55s 0.35s cubic-bezi
 .avatar-large-wrap {
     display: inline-block;
     margin: 0 auto 8px;
+}
+
+
+
+/* ─────────────────────────────────────────────────────────────────
+   Font presets (admin-controlled, applied via [data-font] on <html>).
+   Body font handles all running text; display font handles tab labels,
+   profile name, big numbers, and section headings.
+   ───────────────────────────────────────────────────────────────── */
+
+/* Sport — clean modern body + bold sporty display.
+   Russo One is Latin+Cyrillic; chunky and trustworthy. */
+[data-font="sport"] {
+    --font-body: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-display: 'Russo One', 'Inter', sans-serif;
+}
+
+/* Classic — newspaper feel, condensed display headings.
+   Both Roboto and Oswald ship Cyrillic. */
+[data-font="classic"] {
+    --font-body: 'Roboto', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-display: 'Oswald', 'Roboto', sans-serif;
+}
+
+/* Modern — single Manrope family across body + display, with weight
+   contrast doing the visual hierarchy work. Cyrillic-native. */
+[data-font="modern"] {
+    --font-body: 'Manrope', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-display: 'Manrope', sans-serif;
+}
+
+/* Display-font hookup. Limited to elements where the visual upgrade is
+   noticeable; running paragraph text stays in --font-body. */
+h1, h2, h3,
+.profile-hero-name,
+.tab-label,
+.card-title,
+.streak-current,
+.live-count,
+.stat-card strong {
+    font-family: var(--font-display);
+}
+[data-font="modern"] .profile-hero-name { font-weight: 800; letter-spacing: -0.02em; }
+[data-font="classic"] .profile-hero-name,
+[data-font="classic"] h2,
+[data-font="classic"] h3 { letter-spacing: 0.02em; }
+[data-font="sport"] .profile-hero-name { letter-spacing: -0.005em; }
+
+/* ─────────────────────────────────────────────────────────────────
+   Local background uploader (Settings → Background)
+   File picker + preview tile + reset button. The actual image lives
+   in localStorage as a base64 string and is applied as a CSS variable
+   `--user-bg` on <html>; the body's `::before` pseudo paints it so
+   it sits behind every card without any z-index gymnastics in
+   per-component styles.
+   ───────────────────────────────────────────────────────────────── */
+
+/* Apply user-uploaded background. Pseudo on body so individual cards
+   keep their own bg-card and stay readable. The opacity is intentional
+   — too punchy and content stops being legible. */
+html[data-user-bg="1"] body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    background-image: var(--user-bg, none);
+    background-size: cover;
+    background-position: center;
+    background-attachment: fixed;
+    opacity: 0.55;
+    pointer-events: none;
+}
+html[data-user-bg="1"] body::after {
+    /* Soft dark overlay so cards still pop against bright photos. */
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    background: linear-gradient(180deg, rgba(10,22,40,0.45), rgba(10,22,40,0.7));
+    pointer-events: none;
+}
+
+.bg-uploader {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin: 8px 0 4px;
+}
+.bg-uploader-pick {
+    flex: 1;
+    min-width: 160px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    background: linear-gradient(135deg, var(--blue), var(--blue-light));
+    color: #fff;
+    font-weight: 600;
+    border-radius: 8px;
+    padding: 10px 14px;
+    cursor: pointer;
+    transition: transform 0.12s, box-shadow 0.12s;
+}
+.bg-uploader-pick:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 14px rgba(5,99,193,0.4);
+}
+.bg-uploader-pick input[type="file"] {
+    /* Hide the ugly browser default; the label catches the click. */
+    position: absolute;
+    width: 0;
+    height: 0;
+    opacity: 0;
+    pointer-events: none;
+}
+.bg-uploader-clear {
+    background: var(--bg);
+    border: 1px solid var(--text-dim);
+    color: var(--text);
+    padding: 10px 14px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.12s;
+    font: inherit;
+}
+.bg-uploader-clear:hover { background: var(--bg-card-hover); }
+.bg-uploader-preview {
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    border-radius: 10px;
+    background-size: cover;
+    background-position: center;
+    background-color: var(--bg);
+    border: 1px solid rgba(255,255,255,0.08);
+    margin-bottom: 8px;
+}
+.bg-uploader-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
+    font-size: 0.85rem;
+    text-align: center;
+    padding: 12px;
+}
+.bg-uploader-hint {
+    color: var(--text-dim);
+    font-size: 0.78rem;
+    margin-top: 6px;
+    line-height: 1.35;
 }

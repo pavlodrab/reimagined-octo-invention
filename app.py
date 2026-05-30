@@ -1273,6 +1273,7 @@ def api_config():
             "results_chat_id": cfg.get("results_chat_id", ""),
             "results_template": cfg.get("results_template", "top5"),
             "announce_matches": cfg.get("announce_matches", "1"),
+            "font_preset": cfg.get("font_preset", "system"),
         }
     })
 
@@ -2808,7 +2809,8 @@ def api_admin_config():
     admin_id = _admin_check()
     body = request.get_json(force=True)
     allowed = {"voting_period_hours", "max_rating", "sstats_token", "default_background_url", "bot_name",
-               "auto_create_polls", "auto_close_polls", "auto_notify", "notify_chat_id", "allow_revote_hours"}
+               "auto_create_polls", "auto_close_polls", "auto_notify", "notify_chat_id", "allow_revote_hours",
+               "font_preset"}
     # Validate voting_period_hours is a positive integer
     if "voting_period_hours" in body:
         try:
@@ -2817,6 +2819,11 @@ def api_admin_config():
                 return jsonify({"success": False, "error": "voting_period_hours must be a positive integer"}), 400
         except (ValueError, TypeError):
             return jsonify({"success": False, "error": "voting_period_hours must be a positive integer"}), 400
+    # Whitelist font_preset values — anything else and the frontend would
+    # silently fall back to system, but better to reject loudly here so
+    # admin sees the bad input immediately.
+    if "font_preset" in body and body["font_preset"] not in ("system", "sport", "classic", "modern"):
+        return jsonify({"success": False, "error": "font_preset must be one of: system, sport, classic, modern"}), 400
     for k, v in body.items():
         if k in allowed:
             set_config(k, str(v))

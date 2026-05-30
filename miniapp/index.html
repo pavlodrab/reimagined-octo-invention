@@ -1,9 +1,19 @@
 <!DOCTYPE html>
-<html lang="ru" data-theme="dark">
+<html lang="ru" data-theme="dark" data-font="system">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Челси Голосование</title>
+    <!--
+      Font presets controlled by [data-font="..."] on <html>.
+      All four families are preconnected + lazy-loaded via display=swap so
+      we don't block paint. Cyrillic subset is included for every family
+      (Russo One/Oswald are display-only — for the few Cyrillic headlines
+      they don't cover, the system stack inherits via the fallback chain).
+    -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Manrope:wght@400;500;600;700;800&family=Roboto:wght@400;500;700;900&family=Oswald:wght@400;500;600;700&family=Russo+One&display=swap">
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
