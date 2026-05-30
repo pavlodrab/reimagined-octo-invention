@@ -2145,7 +2145,15 @@ async function renderProfileTab() {
     content.style.display = 'block';
 
     const p = state.myProfile || {};
-    const customId = p.custom_id || p.auto_id || '—';
+    // ID display: prefer custom > auto > user-derived fallback (never raw em-dash).
+    // The fallback is needed because if /api/profile/me failed (e.g. before
+    // PR #16's BIGINT migration ran), state.myProfile may be empty even
+    // though the user is clearly logged in.
+    const customId = p.custom_id
+                  || p.auto_id
+                  || (state.userId
+                        ? 'chelsea-' + String(state.userId).slice(-3).padStart(3, '0')
+                        : '—');
     const votesCount = p.total_votes || 0;
     const canCustomize = votesCount >= 10;
     const currentAvatar = parseInt(p.avatar) || 0;
@@ -2264,7 +2272,42 @@ async function renderProfileTab() {
     }
     avatarGridHtml += '</div>';
 
+    // Hero header: cover banner + overlapping avatar + name with admin badge
+    // + monospace ID pill with copy button. Replaces the two bare cards
+    // (avatar circle + plain "Drake @Drakelovc / ID: —") that looked sparse.
+    const adminVerifyHtml = state.isAdmin
+        ? '<span class="profile-verify" title="' + t('profile.badges.admin') + '">\uD83D\uDEE1\uFE0F</span>'
+        : '';
+    const heroHtml = ''
+        + '<div class="profile-hero">'
+        +   '<div class="profile-cover"></div>'
+        +   '<div class="profile-hero-body">'
+        +     '<div class="profile-avatar-stack">'
+        +       getAvatarHtml(currentAvatar, 100, p.telegram_photo_url || state.telegramPhotoUrl)
+        +     '</div>'
+        +     '<div class="profile-name">'
+        +       '<span>' + escapeHtml(((state.firstName || '') + ' ' + (state.lastName || '')).trim() || '—') + '</span>'
+        +       adminVerifyHtml
+        +     '</div>'
+        +     (state.username
+                ? '<div class="profile-username">@' + escapeHtml(state.username) + '</div>'
+                : '')
+        +     '<div class="profile-id-pill" title="' + t('profile.custom_id') + '">'
+        +       '<span class="profile-id-mono">' + escapeHtml(customId) + '</span>'
+        +       '<button class="profile-id-copy" type="button" '
+        +              'onclick="copyProfileId(this, \'' + escapeHtml(customId).replace(/'/g, "\\'") + '\')" '
+        +              'aria-label="copy">'
+        +         '\uD83D\uDCCB'
+        +       '</button>'
+        +     '</div>'
+        +     (badges ? '<div class="profile-badges-row">' + badges + '</div>' : '')
+        +   '</div>'
+        + '</div>';
+
     content.innerHTML = `
+        <!-- Hero header -->
+        ${heroHtml}
+
         <!-- XP Progress -->
         ${xpHtml}
 
@@ -2274,29 +2317,22 @@ async function renderProfileTab() {
         <!-- Awards Display -->
         ${awardsHtml}
 
-        <!-- Avatar selector -->
+        <!-- Avatar selector grid (avatar circle moved into hero above) -->
         <div class="card text-center">
             <h3 style="margin-bottom:12px;">${t('customization.choose_avatar')}</h3>
-            <div class="avatar-large-wrap">
-                ${getAvatarHtml(currentAvatar, 96, p.telegram_photo_url || state.telegramPhotoUrl)}
-            </div>
             ${avatarGridHtml}
         </div>
 
-        <div class="card text-center">
-            <h3>${state.firstName || ''} ${state.lastName || ''}</h3>
-            <p class="player-meta">@${state.username || '—'}</p>
-            <p class="player-meta">ID: ${customId}</p>
-            <div class="mt-8">${badges}</div>
-        </div>
-        <div class="stats-grid">
-            <div class="stat-card">
-                <strong data-counter="${votesCount}">0</strong>
-                <span class="player-meta">${t('profile.votes_count')}</span>
+        <div class="stats-grid-pretty">
+            <div class="stat-card-pretty">
+                <div class="stat-icon">\u26BD</div>
+                <div class="stat-value" data-counter="${votesCount}">0</div>
+                <div class="stat-label">${t('profile.votes_count')}</div>
             </div>
-            <div class="stat-card">
-                <strong data-counter="${p.avg_rating_given || 0}">0</strong>
-                <span class="player-meta">${t('profile.avg_rating')}</span>
+            <div class="stat-card-pretty">
+                <div class="stat-icon">\u2B50</div>
+                <div class="stat-value" data-counter="${p.avg_rating_given || 0}">0</div>
+                <div class="stat-label">${t('profile.avg_rating')}</div>
             </div>
         </div>
         ${canCustomize ? `
@@ -2467,6 +2503,43 @@ function copyReferral() {
             toast(t('social.copied'));
         }).catch(function() {
             toast(t('common.error'));
+        });
+    } else {
+        toast(t('common.error'));
+    }
+}
+
+/* Copy the displayed profile ID (custom or auto) to the clipboard.
+ * Visual feedback: button briefly turns green with a check, plus toast. */
+function copyProfileId(btn, value) {
+    function flash() {
+        if (!btn) return;
+        var orig = btn.textContent;
+        btn.textContent = '\u2713';
+        btn.classList.add('copied');
+        setTimeout(function() {
+            btn.textContent = orig;
+            btn.classList.remove('copied');
+        }, 1100);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(value).then(function() {
+            flash();
+            toast(t('social.copied'));
+        }).catch(function() {
+            // Fall back to legacy execCommand path on older clients
+            try {
+                var ta = document.createElement('textarea');
+                ta.value = value;
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
+                flash();
+                toast(t('social.copied'));
+            } catch (e) {
+                toast(t('common.error'));
+            }
         });
     } else {
         toast(t('common.error'));
