@@ -1,21 +1,175 @@
-import sqlite3
+import os
 import time
 import json
+import re
+import sqlite3
 from typing import Optional, List, Dict, Any
 
-import os
+# ──────────────────────────────────────────────────────────────────────
+# Driver selection
+# ──────────────────────────────────────────────────────────────────────
+# Postgres is used when DATABASE_URL is set (Railway / production).
+# SQLite is the local dev / fallback driver — the file lives at DB_DIR/chelsea_bot.db.
+# ──────────────────────────────────────────────────────────────────────
 
-# Use /tmp for SQLite on Railway (ephemeral), or /app/data if volume mounted
+_DATABASE_URL: str = (os.getenv('DATABASE_URL') or '').strip()
+_DRIVER: str = 'postgres' if _DATABASE_URL.startswith(('postgres://', 'postgresql://')) else 'sqlite'
+
+# Local SQLite path (dev / CI fallback). On Railway WITHOUT a Postgres add-on,
+# /tmp gets wiped on every redeploy — set DB_DIR to a mounted volume to persist.
 DB_DIR = os.getenv('DB_DIR', '/tmp')
 DB_PATH = os.path.join(DB_DIR, 'chelsea_bot.db')
 
+# Lazy-import psycopg only if Postgres is selected.
+if _DRIVER == 'postgres':
+    import psycopg
+    from psycopg.rows import dict_row
+    # Heroku / Railway sometimes emit deprecated `postgres://` — psycopg3 wants `postgresql://`.
+    if _DATABASE_URL.startswith('postgres://'):
+        _DATABASE_URL = 'postgresql://' + _DATABASE_URL[len('postgres://'):]
+
+
+# ──────────────────────────────────────────────────────────────────────
+# SQL translation: SQLite dialect → Postgres dialect.
+# Translation is intentionally narrow — only what this codebase actually uses.
+# ──────────────────────────────────────────────────────────────────────
+
+# `?` placeholders. Codebase has no `?` inside string literals, so a plain
+# substitution is safe. Verified by grep at migration time.
+_QMARK_RE = re.compile(r'\?')
+
+
+def _translate_sql(sql: str) -> str:
+    """Translate SQLite SQL to Postgres dialect. No-op for SQLite driver."""
+    if _DRIVER == 'sqlite':
+        return sql
+    # DDL: AUTOINCREMENT integer PK → BIGSERIAL
+    sql = sql.replace('INTEGER PRIMARY KEY AUTOINCREMENT', 'BIGSERIAL PRIMARY KEY')
+    # Type: SQLite REAL is 8-byte; Postgres REAL is 4-byte (loses Unix-time precision).
+    sql = re.sub(r'\bREAL\b', 'DOUBLE PRECISION', sql)
+    # Param placeholders
+    sql = _QMARK_RE.sub('%s', sql)
+    return sql
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Connection / cursor wrappers.
+# Both drivers are exposed as a sqlite3-compatible API (the existing code
+# does `conn.execute(...).fetchall()` etc., which we preserve).
+# ──────────────────────────────────────────────────────────────────────
+
+class _Cursor:
+    """Wraps a DB cursor; exposes a sqlite3.Cursor-compatible API."""
+    __slots__ = ('_cur',)
+
+    def __init__(self, cur):
+        self._cur = cur
+
+    def execute(self, sql, params=()):
+        self._cur.execute(_translate_sql(sql), params)
+        return self
+
+    def fetchone(self):
+        return self._cur.fetchone()
+
+    def fetchall(self):
+        return self._cur.fetchall()
+
+    @property
+    def lastrowid(self):
+        # SQLite supports it natively; Postgres doesn't expose it the same way.
+        # The single existing call site has been refactored to _insert_and_get_id().
+        return getattr(self._cur, 'lastrowid', None)
+
+    def __iter__(self):
+        return iter(self._cur)
+
+
+class _Conn:
+    """Wraps a DB connection; exposes a sqlite3.Connection-compatible API."""
+    __slots__ = ('_conn',)
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, sql, params=()):
+        cur = self._conn.cursor()
+        cur.execute(_translate_sql(sql), params)
+        return _Cursor(cur)
+
+    def cursor(self):
+        return _Cursor(self._conn.cursor())
+
+    def commit(self):
+        self._conn.commit()
+
+    def close(self):
+        self._conn.close()
+
 
 def get_connection():
-    conn = sqlite3.connect(DB_PATH, detect_types=sqlite3.PARSE_DECLTYPES)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
+    if _DRIVER == 'sqlite':
+        conn = sqlite3.connect(DB_PATH, detect_types=sqlite3.PARSE_DECLTYPES)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        return _Conn(conn)
+    else:
+        conn = psycopg.connect(_DATABASE_URL, row_factory=dict_row)
+        return _Conn(conn)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Driver-aware INSERT helpers
+# Replace SQLite-specific INSERT OR REPLACE / OR IGNORE in callers.
+# ──────────────────────────────────────────────────────────────────────
+
+def _upsert(conn, table: str, data: Dict[str, Any], conflict_cols: List[str]):
+    """Insert-or-update. Equivalent to SQLite's INSERT OR REPLACE."""
+    cols = list(data.keys())
+    vals = [data[c] for c in cols]
+    if _DRIVER == 'sqlite':
+        ph = ', '.join(['?'] * len(cols))
+        sql = f"INSERT OR REPLACE INTO {table} ({', '.join(cols)}) VALUES ({ph})"
+    else:
+        ph = ', '.join(['%s'] * len(cols))
+        update_cols = [c for c in cols if c not in conflict_cols]
+        if update_cols:
+            update_set = ', '.join(f"{c} = EXCLUDED.{c}" for c in update_cols)
+            sql = (f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({ph}) "
+                   f"ON CONFLICT ({', '.join(conflict_cols)}) DO UPDATE SET {update_set}")
+        else:
+            sql = (f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({ph}) "
+                   f"ON CONFLICT ({', '.join(conflict_cols)}) DO NOTHING")
+    conn.execute(sql, vals)
+
+
+def _insert_ignore(conn, table: str, data: Dict[str, Any], conflict_cols: List[str]):
+    """Insert if not exists, skip on conflict. Equivalent to SQLite's INSERT OR IGNORE."""
+    cols = list(data.keys())
+    vals = [data[c] for c in cols]
+    if _DRIVER == 'sqlite':
+        ph = ', '.join(['?'] * len(cols))
+        sql = f"INSERT OR IGNORE INTO {table} ({', '.join(cols)}) VALUES ({ph})"
+    else:
+        ph = ', '.join(['%s'] * len(cols))
+        sql = (f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({ph}) "
+               f"ON CONFLICT ({', '.join(conflict_cols)}) DO NOTHING")
+    conn.execute(sql, vals)
+
+
+def _insert_and_get_id(conn, sql: str, params=()) -> int:
+    """Execute INSERT, return new row's `id`. Driver-aware (RETURNING on Postgres)."""
+    if _DRIVER == 'sqlite':
+        cur = conn.execute(sql, params)
+        return cur.lastrowid or 0
+    else:
+        s = sql.rstrip().rstrip(';')
+        if 'RETURNING' not in s.upper():
+            s = s + ' RETURNING id'
+        cur = conn.execute(s, params)
+        row = cur.fetchone()
+        return (row['id'] if row else 0)
 
 
 def init_db():
@@ -350,10 +504,17 @@ def init_db():
         ''')
 
         # ── avatar column on profiles ──────────────────────────
-        try:
-            cur.execute("ALTER TABLE profiles ADD COLUMN avatar TEXT DEFAULT '0'")
-        except Exception:
-            pass  # column already exists
+        # On Postgres use IF NOT EXISTS to avoid aborting the surrounding transaction
+        # when the column already exists (Postgres aborts the whole tx on error).
+        # SQLite (3.31 in Python 3.9) doesn't support IF NOT EXISTS for ADD COLUMN,
+        # so fall back to the try/except pattern there.
+        if _DRIVER == 'postgres':
+            cur.execute("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS avatar TEXT DEFAULT '0'")
+        else:
+            try:
+                cur.execute("ALTER TABLE profiles ADD COLUMN avatar TEXT DEFAULT '0'")
+            except Exception:
+                pass  # column already exists
 
         # ── default config values ───────────────────────────────
         import os as _os
@@ -381,7 +542,7 @@ def init_db():
             'monitoring_admin_chat_id': '',
         }
         for k, v in defaults.items():
-            cur.execute('INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)', (k, v))
+            _insert_ignore(conn, 'config', {'key': k, 'value': v}, ['key'])
 
         conn.commit()
     finally:
@@ -433,10 +594,12 @@ def is_admin(user_id: int) -> bool:
 def add_admin(user_id: int, username: str, added_by: int):
     conn = get_connection()
     try:
-        conn.execute(
-            'INSERT OR REPLACE INTO admins (user_id, username, added_by, added_at) VALUES (?, ?, ?, ?)',
-            (user_id, username, added_by, time.time())
-        )
+        _upsert(conn, 'admins', {
+            'user_id': user_id,
+            'username': username,
+            'added_by': added_by,
+            'added_at': time.time(),
+        }, conflict_cols=['user_id'])
         conn.commit()
     finally:
         conn.close()
@@ -782,10 +945,12 @@ def get_default_background() -> Optional[str]:
 def add_prediction(poll_id: str, user_id: int, player_id: str):
     conn = get_connection()
     try:
-        conn.execute('''
-            INSERT OR REPLACE INTO predictions (poll_id, user_id, player_id, timestamp)
-            VALUES (?, ?, ?, ?)
-        ''', (poll_id, user_id, player_id, time.time()))
+        _upsert(conn, 'predictions', {
+            'poll_id': poll_id,
+            'user_id': user_id,
+            'player_id': player_id,
+            'timestamp': time.time(),
+        }, conflict_cols=['poll_id', 'user_id'])
         conn.commit()
     finally:
         conn.close()
@@ -848,10 +1013,13 @@ def resolve_predictions(poll_id: str, actual_best_player_id: str):
 def add_mini_game_guess(match_id: str, user_id: int, game_type: str, guess_json: str):
     conn = get_connection()
     try:
-        conn.execute('''
-            INSERT OR REPLACE INTO mini_games (match_id, user_id, game_type, guess, timestamp)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (match_id, user_id, game_type, guess_json, time.time()))
+        _upsert(conn, 'mini_games', {
+            'match_id': match_id,
+            'user_id': user_id,
+            'game_type': game_type,
+            'guess': guess_json,
+            'timestamp': time.time(),
+        }, conflict_cols=['match_id', 'user_id', 'game_type'])
         conn.commit()
     finally:
         conn.close()
@@ -876,10 +1044,11 @@ def get_mini_game_results(match_id: str, user_id: int = None) -> List[Dict]:
 def add_referral(referrer_id: int, referred_id: int):
     conn = get_connection()
     try:
-        conn.execute('''
-            INSERT OR IGNORE INTO referrals (referrer_user_id, referred_user_id, timestamp)
-            VALUES (?, ?, ?)
-        ''', (referrer_id, referred_id, time.time()))
+        _insert_ignore(conn, 'referrals', {
+            'referrer_user_id': referrer_id,
+            'referred_user_id': referred_id,
+            'timestamp': time.time(),
+        }, conflict_cols=['referred_user_id'])
         conn.commit()
     finally:
         conn.close()
@@ -1080,10 +1249,11 @@ def add_xp(user_id: int, amount: int, reason: str = None):
         else:
             new_total = amount
         level = _calc_level(new_total)
-        conn.execute('''
-            INSERT OR REPLACE INTO user_xp (user_id, total_xp, level)
-            VALUES (?, ?, ?)
-        ''', (user_id, new_total, level))
+        _upsert(conn, 'user_xp', {
+            'user_id': user_id,
+            'total_xp': new_total,
+            'level': level,
+        }, conflict_cols=['user_id'])
         conn.commit()
     finally:
         conn.close()
@@ -1196,10 +1366,13 @@ def save_match_events(match_id: str, events: List[Dict]):
     conn = get_connection()
     try:
         for ev in events:
-            conn.execute('''
-                INSERT OR IGNORE INTO match_events (match_id, player_id, event_type, minute, detail)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (match_id, ev.get('player_id'), ev.get('event_type'), ev.get('minute'), ev.get('detail')))
+            _insert_ignore(conn, 'match_events', {
+                'match_id': match_id,
+                'player_id': ev.get('player_id'),
+                'event_type': ev.get('event_type'),
+                'minute': ev.get('minute'),
+                'detail': ev.get('detail'),
+            }, conflict_cols=['match_id', 'player_id', 'event_type', 'minute'])
         conn.commit()
     finally:
         conn.close()
@@ -1227,10 +1400,12 @@ def save_ai_ratings(match_id: str, ratings: List[Dict]):
     conn = get_connection()
     try:
         for r in ratings:
-            conn.execute('''
-                INSERT OR REPLACE INTO ai_ratings (match_id, player_id, sstats_rating, normalized_rating)
-                VALUES (?, ?, ?, ?)
-            ''', (match_id, r.get('player_id'), r.get('sstats_rating'), r.get('normalized_rating')))
+            _upsert(conn, 'ai_ratings', {
+                'match_id': match_id,
+                'player_id': r.get('player_id'),
+                'sstats_rating': r.get('sstats_rating'),
+                'normalized_rating': r.get('normalized_rating'),
+            }, conflict_cols=['match_id', 'player_id'])
         conn.commit()
     finally:
         conn.close()
@@ -1260,13 +1435,13 @@ def create_challenge(title: str, description: str, challenge_type: str, target: 
     conn = get_connection()
     try:
         now = time.time()
-        cur = conn.execute('''
+        new_id = _insert_and_get_id(conn, '''
             INSERT INTO challenges (title, description, type, target, reward_xp, start_time, end_time, active, created_by)
             VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
         ''', (title, description, challenge_type, target, reward_xp,
               start_time or now, end_time, created_by))
         conn.commit()
-        return cur.lastrowid
+        return new_id
     finally:
         conn.close()
 
@@ -1389,10 +1564,14 @@ def save_award(user_id: int, award_type: str, month: str, details: dict = None):
     try:
         year = int(month.split('-')[0]) if '-' in month else 0
         details_json = json.dumps(details, ensure_ascii=False) if details else None
-        conn.execute('''
-            INSERT OR IGNORE INTO awards (user_id, award_type, month, year, details, awarded_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (user_id, award_type, month, year, details_json, time.time()))
+        _insert_ignore(conn, 'awards', {
+            'user_id': user_id,
+            'award_type': award_type,
+            'month': month,
+            'year': year,
+            'details': details_json,
+            'awarded_at': time.time(),
+        }, conflict_cols=['user_id', 'award_type', 'month'])
         conn.commit()
     finally:
         conn.close()
@@ -1512,10 +1691,11 @@ def set_fpl_cache(key: str, data):
     conn = get_connection()
     try:
         data_str = json.dumps(data, ensure_ascii=False)
-        conn.execute('''
-            INSERT OR REPLACE INTO fpl_cache (key, data, cached_at)
-            VALUES (?, ?, ?)
-        ''', (key, data_str, time.time()))
+        _upsert(conn, 'fpl_cache', {
+            'key': key,
+            'data': data_str,
+            'cached_at': time.time(),
+        }, conflict_cols=['key'])
         conn.commit()
     finally:
         conn.close()
@@ -1529,21 +1709,17 @@ def save_match_analytics(match_id: str, poll_id: str, data_dict: Dict):
     """Save pre-match analytics data."""
     conn = get_connection()
     try:
-        conn.execute('''
-            INSERT OR REPLACE INTO match_analytics
-            (match_id, poll_id, opponent_name, opponent_id, opponent_form, h2h_stats, predicted_result, analytics_data, generated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            match_id,
-            poll_id,
-            data_dict.get('opponent_name'),
-            data_dict.get('opponent_id'),
-            json.dumps(data_dict.get('opponent_form'), ensure_ascii=False) if data_dict.get('opponent_form') else None,
-            json.dumps(data_dict.get('h2h_stats'), ensure_ascii=False) if data_dict.get('h2h_stats') else None,
-            data_dict.get('predicted_result'),
-            json.dumps(data_dict.get('analytics_data'), ensure_ascii=False) if data_dict.get('analytics_data') else None,
-            time.time()
-        ))
+        _upsert(conn, 'match_analytics', {
+            'match_id': match_id,
+            'poll_id': poll_id,
+            'opponent_name': data_dict.get('opponent_name'),
+            'opponent_id': data_dict.get('opponent_id'),
+            'opponent_form': json.dumps(data_dict.get('opponent_form'), ensure_ascii=False) if data_dict.get('opponent_form') else None,
+            'h2h_stats': json.dumps(data_dict.get('h2h_stats'), ensure_ascii=False) if data_dict.get('h2h_stats') else None,
+            'predicted_result': data_dict.get('predicted_result'),
+            'analytics_data': json.dumps(data_dict.get('analytics_data'), ensure_ascii=False) if data_dict.get('analytics_data') else None,
+            'generated_at': time.time(),
+        }, conflict_cols=['match_id'])
         conn.commit()
     finally:
         conn.close()
@@ -1614,10 +1790,13 @@ def save_match_report(poll_id: str, match_id: str, report_text: str, report_data
     conn = get_connection()
     try:
         data_json = json.dumps(report_data, ensure_ascii=False) if report_data else None
-        conn.execute('''
-            INSERT OR REPLACE INTO match_reports (poll_id, match_id, report_text, report_data, generated_at)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (poll_id, match_id, report_text, data_json, time.time()))
+        _upsert(conn, 'match_reports', {
+            'poll_id': poll_id,
+            'match_id': match_id,
+            'report_text': report_text,
+            'report_data': data_json,
+            'generated_at': time.time(),
+        }, conflict_cols=['poll_id'])
         conn.commit()
     finally:
         conn.close()
