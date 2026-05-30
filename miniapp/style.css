@@ -1242,3 +1242,214 @@ body.app-booting #main          { animation: boot-fade-in 0.55s 0.35s cubic-bezi
     display: inline-block;
     margin: 0 auto 8px;
 }
+
+
+
+/* ════════════════════════════════════════════════════════════════════
+   PROFILE HERO REDESIGN  (PR #17)
+   Replaces the bare "name + username + ID" card with a Chelsea-themed
+   hero: gradient cover banner, overlapping avatar, prominent name with
+   inline verification badges, monospace ID pill with copy button.
+   ════════════════════════════════════════════════════════════════════ */
+
+.profile-hero {
+    position: relative;
+    margin: 0 0 16px;
+    border-radius: var(--radius);
+    overflow: hidden;
+    background: var(--bg-card);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+    border: 1px solid rgba(3, 70, 148, 0.18);
+}
+
+.profile-cover {
+    height: 110px;
+    background:
+        radial-gradient(ellipse at 75% 20%, rgba(219, 161, 17, 0.28), transparent 55%),
+        radial-gradient(ellipse at 20% 80%, rgba(5, 99, 193, 0.45), transparent 60%),
+        linear-gradient(135deg, #034694 0%, #0563c1 50%, #022e63 100%);
+    position: relative;
+    overflow: hidden;
+}
+/* Subtle dot pattern overlay so the gradient doesn't look bland */
+.profile-cover::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background-image: radial-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+    background-size: 14px 14px;
+    pointer-events: none;
+}
+.profile-cover::before {
+    content: '';
+    position: absolute;
+    right: -30px;
+    top: -20px;
+    width: 140px;
+    height: 140px;
+    background: radial-gradient(circle, rgba(219, 161, 17, 0.18), transparent 70%);
+    border-radius: 50%;
+    pointer-events: none;
+}
+
+.profile-hero-body {
+    padding: 0 18px 18px;
+    text-align: center;
+}
+
+.profile-avatar-stack {
+    display: inline-block;
+    margin-top: -55px;     /* overlap the cover */
+    padding: 4px;
+    background: linear-gradient(135deg, var(--gold), var(--blue-light));
+    border-radius: 50%;
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.4);
+    position: relative;
+    animation: avatar-pop-in 0.5s cubic-bezier(.18, 1.18, .35, 1.06) both;
+}
+@keyframes avatar-pop-in {
+    from { opacity: 0; transform: translateY(8px) scale(0.92); }
+    to   { opacity: 1; transform: translateY(0)   scale(1); }
+}
+.profile-avatar-stack > div,
+.profile-avatar-stack > img {
+    border: 3px solid var(--bg-card);
+}
+
+.profile-name {
+    margin: 12px 0 2px;
+    font-size: 1.35rem;
+    font-weight: 800;
+    letter-spacing: -0.01em;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text);
+}
+.profile-verify {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    font-size: 0.8rem;
+    background: linear-gradient(135deg, var(--gold), #f0c040);
+    color: #1a1a2e;
+    box-shadow: 0 2px 6px rgba(219, 161, 17, 0.5);
+    animation: verify-pulse 2.5s ease-in-out infinite;
+}
+@keyframes verify-pulse {
+    0%, 100% { box-shadow: 0 2px 6px rgba(219, 161, 17, 0.5); }
+    50%      { box-shadow: 0 2px 14px rgba(219, 161, 17, 0.9); }
+}
+
+.profile-username {
+    font-size: 0.92rem;
+    color: var(--blue-light);
+    font-weight: 500;
+    margin-bottom: 10px;
+}
+
+/* ID pill — monospace + copy button */
+.profile-id-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 6px 5px 12px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(219, 161, 17, 0.25);
+    border-radius: 999px;
+    font-size: 0.78rem;
+    color: var(--gold);
+    font-family: 'SF Mono', 'JetBrains Mono', 'Roboto Mono', Consolas, Menlo, monospace;
+    letter-spacing: 0.02em;
+    margin-bottom: 12px;
+    transition: background 0.18s, border-color 0.18s;
+}
+.profile-id-pill:hover {
+    background: rgba(219, 161, 17, 0.08);
+    border-color: rgba(219, 161, 17, 0.5);
+}
+.profile-id-mono {
+    user-select: all;
+}
+.profile-id-copy {
+    background: rgba(219, 161, 17, 0.15);
+    border: 0;
+    border-radius: 50%;
+    width: 22px;
+    height: 22px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--gold);
+    cursor: pointer;
+    font-size: 0.7rem;
+    transition: background 0.15s, transform 0.15s;
+}
+.profile-id-copy:hover {
+    background: rgba(219, 161, 17, 0.3);
+}
+.profile-id-copy:active {
+    transform: scale(0.88);
+}
+.profile-id-copy.copied {
+    background: var(--success);
+    color: #fff;
+    animation: copy-flash 0.4s ease;
+}
+@keyframes copy-flash {
+    0%   { transform: scale(1); }
+    40%  { transform: scale(1.18); }
+    100% { transform: scale(1); }
+}
+
+.profile-badges-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    justify-content: center;
+    margin-top: 6px;
+}
+
+/* Stats: 2-3 column gradient cards with icons */
+.stats-grid-pretty {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+    margin: 0 0 16px;
+}
+.stat-card-pretty {
+    background: linear-gradient(135deg, rgba(3, 70, 148, 0.18), rgba(3, 70, 148, 0.04));
+    border: 1px solid rgba(3, 70, 148, 0.25);
+    border-radius: var(--radius);
+    padding: 14px 12px;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+.stat-card-pretty:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 18px rgba(3, 70, 148, 0.3);
+}
+.stat-card-pretty .stat-icon {
+    font-size: 1.4rem;
+    margin-bottom: 4px;
+    opacity: 0.85;
+}
+.stat-card-pretty .stat-value {
+    font-size: 1.7rem;
+    font-weight: 800;
+    color: var(--gold);
+    line-height: 1.1;
+    font-variant-numeric: tabular-nums;
+}
+.stat-card-pretty .stat-label {
+    font-size: 0.72rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-top: 2px;
+}
