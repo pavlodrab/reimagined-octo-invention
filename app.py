@@ -100,6 +100,87 @@ limiter = Limiter(
 )
 
 
+# ── Telegram webhook (optional — only when WEBHOOK_URL is set) ─────────
+# When WEBHOOK_URL is set, this Flask app receives Telegram updates at
+# `/telegram/webhook/<WEBHOOK_SECRET_PATH>` and dispatches them through
+# the same handlers as polling-mode bot.py. When unset, this code is a
+# no-op and bot.py is expected to run separately in polling mode.
+
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip().rstrip("/")
+WEBHOOK_SECRET_PATH = os.getenv("WEBHOOK_SECRET_PATH", "").strip()
+WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN", "").strip()
+
+webhook_bot = None  # set below if webhook mode is enabled
+
+if WEBHOOK_URL and TELEGRAM_TOKEN:
+    if not WEBHOOK_SECRET_PATH:
+        logger.error(
+            "WEBHOOK_URL is set but WEBHOOK_SECRET_PATH is empty — refusing to "
+            "expose webhook on a guessable path. Set WEBHOOK_SECRET_PATH to a "
+            "long random string (e.g. `python -c 'import secrets;print(secrets.token_urlsafe(32))'`).")
+    else:
+        try:
+            from webhook import WebhookBot
+            from bot import register_handlers as _register_bot_handlers
+
+            webhook_bot = WebhookBot(token=TELEGRAM_TOKEN)
+            webhook_bot.start(_register_bot_handlers)
+            full_webhook_url = f"{WEBHOOK_URL}/telegram/webhook/{WEBHOOK_SECRET_PATH}"
+            webhook_bot.set_webhook(
+                full_webhook_url,
+                secret_token=WEBHOOK_SECRET_TOKEN or None,
+            )
+            atexit_registered = False
+            try:
+                import atexit as _atexit
+                _atexit.register(lambda: webhook_bot.stop() if webhook_bot else None)
+                atexit_registered = True
+            except Exception:
+                logger.exception("could not register webhook_bot atexit handler")
+            logger.info(
+                "Telegram webhook mode active (registered=%s, atexit=%s)",
+                full_webhook_url, atexit_registered,
+            )
+        except Exception:
+            logger.exception("Telegram webhook init failed; falling back to no-bot mode")
+            webhook_bot = None
+elif WEBHOOK_URL and not TELEGRAM_TOKEN:
+    logger.error("WEBHOOK_URL is set but TELEGRAM_TOKEN is empty — webhook disabled.")
+else:
+    logger.info("WEBHOOK_URL not set — Telegram webhook disabled (use bot.py polling instead).")
+
+
+@app.post("/telegram/webhook/<secret_path>")
+@limiter.exempt  # Telegram retries on 429; never rate-limit Telegram itself.
+def telegram_webhook(secret_path: str):
+    """Receive updates from Telegram. Verifies path secret + header secret."""
+    if webhook_bot is None or not WEBHOOK_SECRET_PATH:
+        # Webhook isn't configured on this deploy — return 404 so an attacker
+        # can't tell us apart from a bare Flask app.
+        abort(404)
+    # Constant-time comparison of the path secret (path itself is already
+    # filtered by Flask routing, but we double-check against a separate const).
+    import hmac as _h
+    if not _h.compare_digest(secret_path, WEBHOOK_SECRET_PATH):
+        abort(404)
+    # Telegram includes WEBHOOK_SECRET_TOKEN in this header (if we asked for one).
+    if WEBHOOK_SECRET_TOKEN:
+        sent = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if not _h.compare_digest(sent, WEBHOOK_SECRET_TOKEN):
+            logger.warning("Telegram webhook: bad/missing X-Telegram-Bot-Api-Secret-Token header")
+            abort(403)
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        abort(400)
+    try:
+        webhook_bot.process_update_dict(payload)
+    except Exception:
+        logger.exception("Telegram webhook dispatch failed")
+        # Return 200 anyway — returning 5xx makes Telegram retry, which can
+        # cascade if a single update is broken. The exception is logged.
+    return ("", 200)
+
+
 # ── Challenge System ───────────────────────────────────────────────────
 
 def create_default_challenges():

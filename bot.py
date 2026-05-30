@@ -261,20 +261,30 @@ async def predict_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def register_handlers(application) -> None:
+    """Attach all command handlers to the given PTB Application.
+
+    Used by both the polling entry point (main()) and the webhook adapter
+    in app.py — keeping a single source of truth for which commands the
+    bot supports.
+    """
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_cmd))
+    application.add_handler(CommandHandler("stats", stats_cmd))
+    application.add_handler(CommandHandler("top", top_cmd))
+    application.add_handler(CommandHandler("streak", streak_cmd))
+    application.add_handler(CommandHandler("predict", predict_cmd))
+    # Owner-only admin management commands
+    application.add_handler(CommandHandler("admin_add", admin_add_cmd))
+    application.add_handler(CommandHandler("admin_remove", admin_remove_cmd))
+    application.add_handler(CommandHandler("admins", admins_cmd))
+
+
 def main():
     if not TELEGRAM_TOKEN:
         raise RuntimeError("Set TELEGRAM_TOKEN environment variable")
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("stats", stats_cmd))
-    app.add_handler(CommandHandler("top", top_cmd))
-    app.add_handler(CommandHandler("streak", streak_cmd))
-    app.add_handler(CommandHandler("predict", predict_cmd))
-    # Owner-only admin management commands
-    app.add_handler(CommandHandler("admin_add", admin_add_cmd))
-    app.add_handler(CommandHandler("admin_remove", admin_remove_cmd))
-    app.add_handler(CommandHandler("admins", admins_cmd))
+    register_handlers(app)
     logger.info("Bot started (polling)")
     app.run_polling()
 
