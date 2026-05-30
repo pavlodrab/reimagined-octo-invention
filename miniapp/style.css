@@ -1044,3 +1044,182 @@ header.scrolled #logo { transform: scale(0.92); transition: transform 0.22s; }
 .loading:has(.skeleton-card)::after {
     display: none;
 }
+
+
+
+/* ════════════════════════════════════════════════════════════════════
+   ANIMATIONS PART 2 — DEEPER POLISH (PR #13)
+   Layered on top of PR #12. All GPU-accelerated, all reduced-motion aware.
+   ════════════════════════════════════════════════════════════════════ */
+
+/* ── 14. Bar chart fill from 0 with stagger (animation, not transition) — */
+.bar-chart-bar {
+    width: 0 !important;        /* override any inline width=X% */
+    animation: bar-grow 0.85s cubic-bezier(.18, .89, .32, 1) forwards;
+    animation-delay: var(--bar-delay, 0ms);
+}
+@keyframes bar-grow {
+    to { width: var(--bar-target, 0%); }
+}
+
+/* ── 15. Player photo fade-in (paired with onload="this.classList.add('loaded')") */
+.player-photo {
+    opacity: 0;
+    transform: scale(1.06);
+    transition: opacity 0.45s ease, transform 0.5s cubic-bezier(.18, .89, .32, 1);
+}
+.player-photo.loaded {
+    opacity: 1;
+    transform: scale(1);
+}
+.player-photo-placeholder {
+    animation: card-enter 0.4s ease both;
+}
+
+/* ── 16. Submit "ready" pulse — when all players are rated */
+.btn-primary.ready {
+    animation: ready-pulse 1.6s ease-in-out infinite;
+}
+@keyframes ready-pulse {
+    0%, 100% {
+        box-shadow: 0 4px 15px rgba(219, 161, 17, 0.45);
+        transform: translateY(0);
+    }
+    50% {
+        box-shadow: 0 6px 28px rgba(219, 161, 17, 0.85), 0 0 0 4px rgba(219, 161, 17, 0.18);
+        transform: translateY(-1px);
+    }
+}
+
+/* ── 17. Top-3 podium reveal in bar charts: golden glow + scale-in stagger — */
+.bar-chart-row.podium-1,
+.bar-chart-row.podium-2,
+.bar-chart-row.podium-3 {
+    animation: podium-rise 0.7s cubic-bezier(.18, 1.18, .35, 1.06) both;
+    border-radius: 8px;
+    padding: 4px 6px;
+    margin: 2px 0;
+}
+.bar-chart-row.podium-1 {
+    animation-delay: 0.55s;
+    background: linear-gradient(90deg, rgba(219,161,17,0.18), transparent 70%);
+    box-shadow: inset 0 0 0 1px rgba(219, 161, 17, 0.3);
+}
+.bar-chart-row.podium-2 {
+    animation-delay: 0.4s;
+    background: linear-gradient(90deg, rgba(192, 192, 192, 0.13), transparent 70%);
+}
+.bar-chart-row.podium-3 {
+    animation-delay: 0.25s;
+    background: linear-gradient(90deg, rgba(205, 127, 50, 0.13), transparent 70%);
+}
+@keyframes podium-rise {
+    from { opacity: 0; transform: translateY(14px) scale(0.97); }
+    to   { opacity: 1; transform: translateY(0)    scale(1); }
+}
+
+/* ── 18. Medal emoji shine — continuous subtle sparkle */
+.medal {
+    display: inline-block;
+    position: relative;
+    background: linear-gradient(120deg,
+        currentColor 0%, currentColor 40%,
+        rgba(255,255,255,0.95) 50%,
+        currentColor 60%, currentColor 100%);
+    background-size: 200% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    /* fallback keeps emojis legible if -webkit-text-fill-color isn't honoured */
+    filter: drop-shadow(0 0 6px rgba(255,215,90,0.4));
+    animation: medal-shine 3s linear infinite;
+}
+@keyframes medal-shine {
+    0%   { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+/* Drop the gradient text-clip on emojis (it kills emoji rendering on some
+   platforms). Keep only the drop-shadow + a subtle bobbing. */
+.medal-emoji {
+    display: inline-block;
+    filter: drop-shadow(0 0 6px rgba(255,215,90,0.55));
+    animation: medal-bob 2.4s ease-in-out infinite;
+}
+@keyframes medal-bob {
+    0%, 100% { transform: translateY(0)   rotate(0deg); }
+    50%      { transform: translateY(-2px) rotate(-3deg); }
+}
+
+/* ── 19. Streak ember particles — only when streak >= 5 (.streak-fire on parent) */
+.streak-fire-wrap {
+    position: relative;
+    display: inline-block;
+    width: 2.4em;
+    height: 2.4em;
+    line-height: 1;
+}
+.streak-fire-wrap .ember {
+    position: absolute;
+    bottom: 8%;
+    left: 50%;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: radial-gradient(circle, #ffd84a 0%, #ff7a18 70%, transparent 100%);
+    opacity: 0;
+    pointer-events: none;
+    animation: ember-rise 2.2s ease-out infinite;
+}
+.streak-fire-wrap .ember:nth-child(1) { animation-delay: 0s;   --ember-x:  -10px; }
+.streak-fire-wrap .ember:nth-child(2) { animation-delay: 0.4s; --ember-x:   12px; }
+.streak-fire-wrap .ember:nth-child(3) { animation-delay: 0.9s; --ember-x:   -3px; }
+.streak-fire-wrap .ember:nth-child(4) { animation-delay: 1.4s; --ember-x:    8px; }
+.streak-fire-wrap .ember:nth-child(5) { animation-delay: 1.8s; --ember-x:  -16px; }
+@keyframes ember-rise {
+    0%   { transform: translate3d(-50%, 0, 0) scale(0.6); opacity: 0; }
+    15%  { opacity: 0.95; }
+    100% { transform: translate3d(calc(-50% + var(--ember-x, 0px)), -36px, 0) scale(0.4);
+           opacity: 0; }
+}
+
+/* ── 20. First-paint entry sequence — runs once on app boot */
+body.app-booting #header        { animation: boot-fade-in 0.55s 0.05s cubic-bezier(.22, .9, .28, 1) both; }
+body.app-booting #tabs          { animation: boot-fade-in 0.55s 0.20s cubic-bezier(.22, .9, .28, 1) both; }
+body.app-booting #main          { animation: boot-fade-in 0.55s 0.35s cubic-bezier(.22, .9, .28, 1) both; }
+@keyframes boot-fade-in {
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── 21. Heading shimmer when its tab activates (not on every keystroke) — */
+.tab-content.active > h2 {
+    background: linear-gradient(120deg,
+        var(--text) 0%, var(--text) 40%,
+        var(--gold) 50%,
+        var(--text) 60%, var(--text) 100%);
+    background-size: 200% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: heading-shimmer 2.2s ease-out 1;
+}
+@keyframes heading-shimmer {
+    0%   { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+
+/* ── 22. Tab icon bounce on becoming active */
+.tab-btn.active .tab-icon {
+    animation: tab-icon-bounce 0.6s cubic-bezier(.18, 1.18, .35, 1.06) 1;
+}
+@keyframes tab-icon-bounce {
+    0%   { transform: translateY(0)   scale(1); }
+    35%  { transform: translateY(-4px) scale(1.18); }
+    65%  { transform: translateY(1px) scale(0.96); }
+    100% { transform: translateY(0)   scale(1); }
+}
+
+/* ── 23. Counter (used by animateNumber JS helper) tabular-nums looks tighter */
+.counter, [data-counter] {
+    font-variant-numeric: tabular-nums;
+}

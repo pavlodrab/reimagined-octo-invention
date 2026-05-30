@@ -130,6 +130,48 @@ function tsToDate(ts) {
     return new Date(ts * 1000).toLocaleString('ru-RU');
 }
 
+/* ═══ animateNumber: count-up tween for a single element ═══
+ * Reads target from the element's text or an explicit `target` arg, animates
+ * from 0 to target over `duration` ms with ease-out cubic. Respects
+ * prefers-reduced-motion (snaps to final value immediately). */
+function animateNumber(el, target, duration) {
+    if (!el) return;
+    if (target === undefined || target === null || target === '') {
+        target = parseFloat(el.textContent.replace(/[^\d.-]/g, '')) || 0;
+    }
+    target = Number(target);
+    if (!isFinite(target)) { el.textContent = '0'; return; }
+    duration = duration || 800;
+    var reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reduced) { el.textContent = formatCounterValue(target); return; }
+    var startTime = performance.now();
+    var isInt = Number.isInteger(target);
+    function tick(now) {
+        var p = Math.min((now - startTime) / duration, 1);
+        var ease = 1 - Math.pow(1 - p, 3);
+        var v = target * ease;
+        el.textContent = isInt ? Math.floor(v).toString() : v.toFixed(1);
+        if (p < 1) requestAnimationFrame(tick);
+        else el.textContent = formatCounterValue(target);
+    }
+    requestAnimationFrame(tick);
+}
+function formatCounterValue(n) {
+    return Number.isInteger(n) ? String(n) : n.toFixed(1);
+}
+function animateAllCounters(root) {
+    root = root || document;
+    var nodes = root.querySelectorAll('[data-counter]');
+    for (var i = 0; i < nodes.length; i++) {
+        var el = nodes[i];
+        if (el.dataset.counterDone === '1') continue;
+        var target = parseFloat(el.dataset.counter);
+        el.textContent = '0';
+        animateNumber(el, target);
+        el.dataset.counterDone = '1';
+    }
+}
+
 /* ═══ Chelsea-themed Avatars ═══ */
 const AVATARS = [
     { emoji: '', bg: 'var(--blue)', label: 'Default' },
@@ -536,6 +578,13 @@ function switchTab(tab) {
     else if (tab === 'settings') renderSettingsTab();
     else if (tab === 'stats') renderStatsTab();
     else if (tab === 'admin') renderAdminTab();
+
+    // After tab content has had a tick to mount, animate any [data-counter]
+    // numeric values inside the new tab.
+    setTimeout(function () {
+        var pane = document.getElementById(tab + '-tab');
+        if (pane) animateAllCounters(pane);
+    }, 200);
 }
 
 /* ═══════════════════════════════════════════════════
@@ -807,6 +856,7 @@ function renderVoteTab() {
     const submitBtn = document.getElementById('submit-btn');
     const allRated = ratedCount === totalPlayers && totalPlayers > 0;
     submitBtn.disabled = !allRated || state.hasVoted;
+    submitBtn.classList.toggle('ready', allRated && !state.hasVoted);
     submitBtn.textContent = state.hasVoted ? t('vote.already_voted') : t('vote.submit');
     submitBtn.onclick = submitVote;
 }
@@ -820,7 +870,7 @@ function createPlayerCard(p, maxR) {
     }
 
     const photoHtml = p.photo_url
-        ? `<img class="player-photo" src="${p.photo_url}" alt="${p.name}" onerror="this.outerHTML='<div class=\\'player-photo-placeholder\\'>${(p.name||'?')[0]}</div>'">`
+        ? `<img class="player-photo" src="${p.photo_url}" alt="${p.name}" loading="lazy" onload="this.classList.add('loaded')" onerror="this.outerHTML='<div class=\\'player-photo-placeholder\\'>${(p.name||'?')[0]}</div>'">`
         : `<div class="player-photo-placeholder">${(p.name || '?')[0]}</div>`;
 
     const badge = p.is_starter
@@ -1218,7 +1268,7 @@ async function renderPollResults(pollId) {
         }
 
         // Total voters
-        html += '<div class="player-meta mb-8" style="text-align:center;">' + t('history.total_voters') + ': ' + totalVoters + '</div>';
+        html += '<div class="player-meta mb-8" style="text-align:center;">' + t('history.total_voters') + ': <span data-counter="' + totalVoters + '">0</span></div>';
 
         // Fetch FPL data for this poll
         var fplMapping = {};
@@ -1249,10 +1299,12 @@ async function renderPollResults(pollId) {
                 if (fplMapping[pid]) {
                     fplBadge = ' <span class="fpl-badge">FPL: ' + fplMapping[pid].event_points + ' ' + t('fpl.points') + '</span>';
                 }
-                html += '<div class="bar-chart-row">' +
+                var podiumClass = i === 0 ? ' podium-1' : (i === 1 ? ' podium-2' : (i === 2 ? ' podium-3' : ''));
+                var barDelay = (i * 60) + 'ms';
+                html += '<div class="bar-chart-row' + podiumClass + '">' +
                     '<div class="bar-chart-label">' + r.name + fplBadge + '</div>' +
-                    '<div class="bar-chart-bar" style="width:' + widthPct + '%;background:' + barColor + ';"></div>' +
-                    '<div class="bar-chart-value">' + (r.avg_rating != null ? r.avg_rating.toFixed(1) : '-') + '</div>' +
+                    '<div class="bar-chart-bar" style="--bar-target:' + widthPct + '%;--bar-delay:' + barDelay + ';background:' + barColor + ';"></div>' +
+                    '<div class="bar-chart-value" data-counter="' + (r.avg_rating != null ? r.avg_rating.toFixed(1) : '0') + '">0</div>' +
                 '</div>';
             }
             html += '</div>';
@@ -1382,6 +1434,7 @@ async function renderPollResults(pollId) {
                     var topMedals = ['\uD83E\uDD47', '\uD83E\uDD48', '\uD83E\uDD49'];
                     for (var ti = 0; ti < rd.top3.length; ti++) {
                         html += '<div class="report-stat-row">' +
+                            '<span><span class="medal-emoji">' + topMedals[ti] + '</span> ' + (rd.top3[ti].name || '-') + '</span>' +
                             '<span>' + topMedals[ti] + ' ' + rd.top3[ti].name + '</span>' +
                             '<span>' + (rd.top3[ti].avg_rating != null ? Number(rd.top3[ti].avg_rating).toFixed(1) : '-') + '</span>' +
                         '</div>';
@@ -1797,11 +1850,13 @@ async function renderStatsTab() {
         for (var i = 0; i < teamOfSeason.length; i++) {
             var player = teamOfSeason[i];
             var widthPct = (player.avg_rating / maxAvg * 100).toFixed(1);
-            html += '<div class="bar-chart-row">' +
+            var podiumClass = i === 0 ? ' podium-1' : (i === 1 ? ' podium-2' : (i === 2 ? ' podium-3' : ''));
+            var barDelay = (i * 60) + 'ms';
+            html += '<div class="bar-chart-row' + podiumClass + '">' +
                 '<div style="width:24px;text-align:center;font-weight:700;font-size:0.8rem;color:var(--gold);flex-shrink:0;">' + (i + 1) + '</div>' +
                 '<div class="bar-chart-label">' + player.name + '</div>' +
-                '<div class="bar-chart-bar" style="width:' + widthPct + '%;background:' + (i < 3 ? 'var(--gold)' : 'var(--blue)') + ';"></div>' +
-                '<div class="bar-chart-value">' + (player.avg_rating != null ? player.avg_rating.toFixed(1) : '-') + '</div>' +
+                '<div class="bar-chart-bar" style="--bar-target:' + widthPct + '%;--bar-delay:' + barDelay + ';background:' + (i < 3 ? 'var(--gold)' : 'var(--blue)') + ';"></div>' +
+                '<div class="bar-chart-value" data-counter="' + (player.avg_rating != null ? player.avg_rating.toFixed(1) : '0') + '">0</div>' +
             '</div>';
         }
         html += '</div>';
@@ -1830,7 +1885,7 @@ async function renderStatsTab() {
                 formDots += '</div>';
             }
             html += '<div class="leaderboard-row">' +
-                '<div class="leaderboard-rank">' + (i + 1) + '</div>' +
+                '<div class="leaderboard-rank">' + (i < 3 ? '<span class="medal-emoji">' + ['\uD83E\uDD47','\uD83E\uDD48','\uD83E\uDD49'][i] + '</span>' : (i + 1)) + '</div>' +
                 '<div class="leaderboard-info">' +
                     '<div class="leaderboard-name">' + p.name + '</div>' +
                     '<div class="leaderboard-stats">' + (p.avg_rating != null ? p.avg_rating.toFixed(1) : '-') + ' avg &middot; ' + (p.matches_played || 0) + ' matches</div>' +
@@ -1861,7 +1916,7 @@ async function renderStatsTab() {
             if (consistency <= 0.3 && totalVotes > 0) badges += '<span class="badge badge-danger" style="font-size:0.65rem;padding:2px 6px;">' + t('profile.badges.rebel') + '</span>';
 
             html += '<div class="leaderboard-row">' +
-                '<div class="leaderboard-rank">' + (i + 1) + '</div>' +
+                '<div class="leaderboard-rank">' + (i < 3 ? '<span class="medal-emoji">' + ['\uD83E\uDD47','\uD83E\uDD48','\uD83E\uDD49'][i] + '</span>' : (i + 1)) + '</div>' +
                 '<div class="player-photo-placeholder" style="width:32px;height:32px;font-size:0.85rem;flex-shrink:0;">' + initial + '</div>' +
                 '<div class="leaderboard-info">' +
                     '<div class="leaderboard-name">' + displayName + ' ' + badges + '</div>' +
@@ -2110,8 +2165,22 @@ async function renderProfileTab() {
         var maxStreak = (xpData.streak && xpData.streak.max_streak) || 0;
         var fireClass = currentStreak >= 5 ? ' streak-fire' : '';
         var fireEmoji = currentStreak >= 5 ? '\uD83D\uDD25' : '\uD83D\uDD25';
+        // When streak >= 5, render the fire with rising ember particles around it.
+        var fireBlock;
+        if (currentStreak >= 5) {
+            fireBlock = '<div class="streak-fire-wrap" style="font-size:2rem;">' +
+                            '<span class="streak-fire" style="position:relative;z-index:2;">' + fireEmoji + '</span>' +
+                            '<span class="ember"></span>' +
+                            '<span class="ember"></span>' +
+                            '<span class="ember"></span>' +
+                            '<span class="ember"></span>' +
+                            '<span class="ember"></span>' +
+                        '</div>';
+        } else {
+            fireBlock = '<div style="font-size:2rem;opacity:0.6;">' + fireEmoji + '</div>';
+        }
         streakHtml = '<div class="streak-section">' +
-            '<div class="' + (currentStreak >= 5 ? 'streak-fire' : '') + '" style="font-size:2rem;">' + fireEmoji + '</div>' +
+            fireBlock +
             '<div class="streak-info">' +
                 '<div class="streak-current">' + t('xp.streak_current') + ': ' + currentStreak + (currentStreak >= 5 ? ' ' + t('xp.fire_streak') : '') + '</div>' +
                 '<div class="streak-record">' + t('xp.streak_record') + ': ' + maxStreak + '</div>' +
@@ -2197,11 +2266,11 @@ async function renderProfileTab() {
         </div>
         <div class="stats-grid">
             <div class="stat-card">
-                <strong>${votesCount}</strong>
+                <strong data-counter="${votesCount}">0</strong>
                 <span class="player-meta">${t('profile.votes_count')}</span>
             </div>
             <div class="stat-card">
-                <strong>${p.avg_rating_given || '—'}</strong>
+                <strong data-counter="${p.avg_rating_given || 0}">0</strong>
                 <span class="player-meta">${t('profile.avg_rating')}</span>
             </div>
         </div>
@@ -3212,6 +3281,14 @@ if (document.readyState === 'loading') {
 } else {
     init();
 }
+
+// ── First-paint entry sequence: header, tabs, content fade in once at boot.
+// The CSS rules under `body.app-booting ...` provide the staggered animation;
+// we strip the class after the cascade finishes so it doesn't replay later.
+document.body.classList.add('app-booting');
+window.addEventListener('load', function () {
+    setTimeout(function () { document.body.classList.remove('app-booting'); }, 1000);
+});
 
 // ── Page micro-parallax: header lifts subtly when content is scrolled.
 // Uses requestAnimationFrame to avoid scroll-listener jank on Android.
