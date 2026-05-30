@@ -111,10 +111,18 @@ function api(path, opts = {}) {
 function toast(msg, duration = 3000) {
     const el = document.getElementById('toast');
     el.textContent = msg;
+    // Force reflow before adding the visibility class so the slide+fade
+    // animation always plays, even on rapid back-to-back toasts.
     el.style.display = 'block';
-    el.style.opacity = '1';
+    el.classList.remove('toast-visible');
+    // eslint-disable-next-line no-unused-expressions
+    el.offsetHeight;
+    el.classList.add('toast-visible');
     clearTimeout(window._toastTimer);
-    window._toastTimer = setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.style.display = 'none', 300); }, duration);
+    window._toastTimer = setTimeout(() => {
+        el.classList.remove('toast-visible');
+        setTimeout(() => { el.style.display = 'none'; }, 350);
+    }, duration);
 }
 
 function tsToDate(ts) {
@@ -149,7 +157,10 @@ function getAvatarHtml(avatarIndex, size) {
     return '<div style="width:' + s + 'px;height:' + s + 'px;border-radius:50%;background:' + avatar.bg + ';display:flex;align-items:center;justify-content:center;font-size:' + fontSize + 'px;">' + avatar.emoji + '</div>';
 }
 
-/* ═══ Confetti Animation ═══ */
+/* ═══ Confetti Animation 2.0 ═══
+ * Brand-weighted colors (more blue+gold than white), 4 shape variants,
+ * randomized rotation, fall duration and lateral drift. CSS handles the
+ * physics via custom properties (--drift, --spin, --fall-dur).            */
 function launchConfetti() {
     var existing = document.getElementById('confetti-container');
     if (existing) existing.remove();
@@ -157,25 +168,41 @@ function launchConfetti() {
     container.id = 'confetti-container';
     document.body.appendChild(container);
 
-    var colors = ['#034694', '#DBA111', '#ffffff', '#0563c1'];
-    var particleCount = 60 + Math.floor(Math.random() * 20);
+    // Brand-weighted palette: blue and gold appear ~3x as often as accents
+    var palette = [
+        '#034694','#034694','#034694',     // Chelsea blue
+        '#DBA111','#DBA111','#DBA111',     // gold
+        '#0563c1','#0563c1',               // light blue
+        '#f0c040',                          // light gold
+        '#ffffff'                           // white sparkles
+    ];
+    var shapes = ['shape-circle','shape-rect','shape-strip','shape-square','shape-circle'];
+    var n = 70 + Math.floor(Math.random() * 25);
 
-    for (var i = 0; i < particleCount; i++) {
-        var particle = document.createElement('div');
-        particle.className = 'confetti-particle';
-        var color = colors[Math.floor(Math.random() * colors.length)];
+    for (var i = 0; i < n; i++) {
+        var p = document.createElement('div');
+        var shape = shapes[Math.floor(Math.random() * shapes.length)];
+        p.className = 'confetti-particle ' + shape;
+        var color = palette[Math.floor(Math.random() * palette.length)];
         var left = Math.random() * 100;
-        var delay = Math.random() * 0.5;
-        var drift = (Math.random() - 0.5) * 200;
-        var borderRadius = Math.random() > 0.5 ? '50%' : '0';
-        particle.style.cssText = 'left:' + left + '%;background:' + color + ';animation-delay:' + delay + 's;border-radius:' + borderRadius + ';transform:translateX(' + drift + 'px);';
-        container.appendChild(particle);
+        var delay = Math.random() * 0.45;
+        var drift = (Math.random() - 0.5) * 360 + 'px';
+        var spin = (480 + Math.random() * 720) * (Math.random() > 0.5 ? 1 : -1) + 'deg';
+        var dur = (2.4 + Math.random() * 1.6).toFixed(2) + 's';
+        p.style.cssText =
+            'left:' + left + '%;' +
+            'background:' + color + ';' +
+            'animation-delay:' + delay + 's;' +
+            '--drift:' + drift + ';' +
+            '--spin:' + spin + ';' +
+            '--fall-dur:' + dur + ';';
+        container.appendChild(p);
     }
 
     setTimeout(function() {
         var el = document.getElementById('confetti-container');
         if (el) el.remove();
-    }, 3500);
+    }, 4500);
 }
 
 /* ═══ Sound Effects (Web Audio API) ═══ */
@@ -524,7 +551,11 @@ function renderVoteTab() {
     if (!state.currentPoll) {
         loading.style.display = 'none';
         content.style.display = 'block';
-        header.innerHTML = '<div class="msg info">' + t('vote.no_active_polls') + '</div>';
+        header.innerHTML = '<div class="empty-state">' +
+            '<div class="empty-state-icon">\u26BD</div>' +
+            '<div class="empty-state-title">' + t('vote.no_active_polls') + '</div>' +
+            '<div class="empty-state-text">' + t('history.no_polls') + '</div>' +
+            '</div>';
         list.innerHTML = '';
         document.getElementById('submit-btn').style.display = 'none';
         return;
@@ -593,8 +624,16 @@ function renderVoteTab() {
                 const h = Math.floor(remaining / 3600);
                 const m = Math.floor((remaining % 3600) / 60);
                 const s = remaining % 60;
-                el.querySelector('.countdown-value').textContent =
-                    `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+                const newText = `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+                const valueEl = el.querySelector('.countdown-value');
+                if (valueEl.textContent !== newText) {
+                    valueEl.textContent = newText;
+                    // Brief tick animation on each second change
+                    valueEl.classList.remove('ticking');
+                    // eslint-disable-next-line no-unused-expressions
+                    valueEl.offsetHeight;
+                    valueEl.classList.add('ticking');
+                }
             }
         }, 1000);
     }
@@ -735,8 +774,10 @@ function renderVoteTab() {
         startersHeader.textContent = `\u2B50 ${t('vote.starting_lineup')} (${starters.length})`;
         list.appendChild(startersHeader);
 
-        starters.forEach(p => {
-            list.appendChild(createPlayerCard(p, maxR));
+        starters.forEach((p, idx) => {
+            const c = createPlayerCard(p, maxR);
+            c.style.setProperty('--enter-delay', (idx * 45) + 'ms');
+            list.appendChild(c);
         });
     }
 
@@ -746,8 +787,11 @@ function renderVoteTab() {
         subsHeader.textContent = `\uD83D\uDD04 ${t('vote.substitutes')} (${subs.length})`;
         list.appendChild(subsHeader);
 
-        subs.forEach(p => {
-            list.appendChild(createPlayerCard(p, maxR));
+        subs.forEach((p, idx) => {
+            const c = createPlayerCard(p, maxR);
+            // continue stagger from the starter range
+            c.style.setProperty('--enter-delay', ((starters.length + idx) * 45) + 'ms');
+            list.appendChild(c);
         });
     }
 
@@ -770,6 +814,10 @@ function renderVoteTab() {
 function createPlayerCard(p, maxR) {
     const card = document.createElement('div');
     card.className = 'player-card';
+    // If this player was the most recently rated, flash the gold pulse once.
+    if (state.lastRatedPlayerId === p.id) {
+        card.classList.add('just-rated');
+    }
 
     const photoHtml = p.photo_url
         ? `<img class="player-photo" src="${p.photo_url}" alt="${p.name}" onerror="this.outerHTML='<div class=\\'player-photo-placeholder\\'>${(p.name||'?')[0]}</div>'">`
@@ -834,8 +882,15 @@ function createPlayerCard(p, maxR) {
             }
             state.ratings[playerId] = rating;
             state.usedRatings.add(rating);
+            // Mark the just-rated card so the next render flashes a gold pulse
+            // around it (see createPlayerCard).
+            state.lastRatedPlayerId = playerId;
             playSound('click');
             renderVoteTab();
+            // Clear the marker so subsequent unrelated re-renders don't re-flash
+            setTimeout(() => {
+                if (state.lastRatedPlayerId === playerId) state.lastRatedPlayerId = null;
+            }, 700);
         });
     });
 
@@ -948,7 +1003,10 @@ async function submitVote() {
 
     const btn = document.getElementById('submit-btn');
     btn.disabled = true;
-    btn.textContent = t('vote.sending');
+    btn.classList.add('submitting');
+    btn.classList.remove('success');
+    // Keep the label invisible (CSS color: transparent) but readable for SR
+    btn.setAttribute('aria-label', t('vote.sending'));
 
     try {
         const data = await api('/api/vote_batch', {
@@ -963,19 +1021,28 @@ async function submitVote() {
         });
         if (data.success) {
             state.hasVoted = true;
-            document.getElementById('vote-success').style.display = 'block';
-            btn.textContent = t('vote.vote_accepted') + ' \u2705';
-            renderVoteTab();
-            toast(t('vote.vote_success_toast'));
+            // Visible feedback chain: spinner -> green check pulse -> confetti -> renderVoteTab
+            btn.classList.remove('submitting');
+            btn.classList.add('success');
+            btn.textContent = '\u2705 ' + t('vote.vote_accepted');
+            btn.removeAttribute('aria-label');
             launchConfetti();
             playSound('success');
+            toast(t('vote.vote_success_toast'));
+            // Let the success state breathe for a moment, then redraw the tab
+            setTimeout(() => {
+                document.getElementById('vote-success').style.display = 'block';
+                renderVoteTab();
+            }, 650);
         } else {
+            btn.classList.remove('submitting', 'success');
             document.getElementById('vote-error').style.display = 'block';
             document.getElementById('vote-error').textContent = data.error || t('common.error');
             btn.disabled = false;
             btn.textContent = t('vote.submit');
         }
     } catch (e) {
+        btn.classList.remove('submitting', 'success');
         document.getElementById('vote-error').style.display = 'block';
         document.getElementById('vote-error').textContent = t('vote.connection_error');
         btn.disabled = false;
@@ -1043,7 +1110,10 @@ async function renderOtherTab() {
     content.style.display = 'block';
 
     if (matchHistory.length === 0) {
-        content.innerHTML = '<div class="msg info">' + t('history.no_polls') + '</div>';
+        content.innerHTML = '<div class="empty-state">' +
+            '<div class="empty-state-icon">\uD83D\uDCDC</div>' +
+            '<div class="empty-state-title">' + t('history.no_polls') + '</div>' +
+            '</div>';
         return;
     }
 
@@ -1600,8 +1670,19 @@ function disconnectSSE() {
 
 function updateLiveCounter() {
     var el = document.getElementById('live-voter-count');
-    if (el) {
-        el.textContent = state.liveVoterCount;
+    if (!el) return;
+    var prev = parseInt(el.textContent, 10);
+    var next = state.liveVoterCount;
+    el.textContent = next;
+    // Only pulse when the number actually changed (avoid pulsing on first paint
+    // or when SSE re-sends the same value).
+    if (!isNaN(prev) && next !== prev) {
+        el.classList.remove('bumping');
+        // Force reflow so re-adding the class re-triggers the animation.
+        // eslint-disable-next-line no-unused-expressions
+        el.offsetHeight;
+        el.classList.add('bumping');
+        setTimeout(function() { el.classList.remove('bumping'); }, 500);
     }
 }
 
@@ -2921,3 +3002,22 @@ if (document.readyState === 'loading') {
 } else {
     init();
 }
+
+// ── Page micro-parallax: header lifts subtly when content is scrolled.
+// Uses requestAnimationFrame to avoid scroll-listener jank on Android.
+(function attachHeaderParallax() {
+    var hdr = document.getElementById('header');
+    if (!hdr) return;
+    var ticking = false;
+    function update() {
+        if (window.scrollY > 8) hdr.classList.add('scrolled');
+        else hdr.classList.remove('scrolled');
+        ticking = false;
+    }
+    window.addEventListener('scroll', function () {
+        if (!ticking) {
+            window.requestAnimationFrame(update);
+            ticking = true;
+        }
+    }, { passive: true });
+})();
