@@ -2491,7 +2491,11 @@ async function renderAdminTab() {
         ${renderAdminChannel()}
         ${renderAdminPolls()}
         ${renderAdminAdmins()}
+        ${renderAdminVotesView()}
         ${renderAdminVoteAdjust()}
+        ${renderAdminResetVote()}
+        ${renderAdminRemoveVotes()}
+        ${renderAdminChallenges()}
         ${renderAdminBackgrounds()}
         ${renderAdminLogs()}
     `;
@@ -2499,6 +2503,12 @@ async function renderAdminTab() {
     // Add event listeners for dynamic elements
     document.getElementById('btn-create-poll')?.addEventListener('click', createPoll);
     document.getElementById('btn-add-admin')?.addEventListener('click', addAdmin);
+    document.getElementById('btn-load-votes')?.addEventListener('click', adminLoadVotes);
+    document.getElementById('btn-reset-vote')?.addEventListener('click', adminResetVote);
+    document.getElementById('btn-remove-votes')?.addEventListener('click', adminRemoveUserVotes);
+    document.getElementById('btn-create-challenge')?.addEventListener('click', adminCreateChallenge);
+    document.getElementById('btn-toggle-challenge-on')?.addEventListener('click', () => adminToggleChallenge(true));
+    document.getElementById('btn-toggle-challenge-off')?.addEventListener('click', () => adminToggleChallenge(false));
 }
 
 function renderAdminMonitoring() {
@@ -2547,7 +2557,7 @@ function renderAdminMonitoring() {
 }
 
 async function resetApiErrors() {
-    var res = await api('/api/admin/monitoring/reset', 'POST');
+    var res = await api('/api/admin/monitoring/reset', { method: 'POST' });
     if (res.success) {
         state.monitoring = state.monitoring || {};
         state.monitoring.api_error_count = 0;
@@ -2861,6 +2871,206 @@ async function adminAdjustVote() {
         } else { toast(data.error || t('common.error')); }
     } catch (e) { toast(t('common.error')); }
 }
+
+// ──── New admin sections (votes view, reset/remove vote, challenges) ────
+
+function renderAdminVotesView() {
+    return `
+        <div class="admin-section">
+            <h3>\uD83D\uDCCB ${t('admin.votes_view.heading')}</h3>
+            <div class="form-group">
+                <label>${t('admin.votes_view.poll_id')}</label>
+                <input type="text" id="votes-view-poll-id" placeholder="poll_1735862400">
+            </div>
+            <button class="btn-primary" id="btn-load-votes">${t('admin.votes_view.load')}</button>
+            <div id="votes-view-summary" class="player-meta mt-8"></div>
+            <div id="votes-view-list" class="mt-8"></div>
+        </div>`;
+}
+
+async function adminLoadVotes() {
+    const pollId = document.getElementById('votes-view-poll-id').value.trim();
+    if (!pollId) { toast(t('admin.votes_view.enter_poll_id')); return; }
+    const summary = document.getElementById('votes-view-summary');
+    const list = document.getElementById('votes-view-list');
+    summary.textContent = t('admin.loading');
+    list.innerHTML = '';
+    try {
+        const data = await api(`/api/admin/votes/${encodeURIComponent(pollId)}`);
+        if (!data.success) { toast(data.error || t('common.error')); summary.textContent = ''; return; }
+        const byUser = data.by_user || [];
+        const totalVotes = (data.votes || []).length;
+        summary.textContent = `${t('admin.votes_view.total_voters')}: ${data.total_voters || 0} \u00B7 ${t('admin.votes_view.total_votes')}: ${totalVotes}`;
+        if (byUser.length === 0) {
+            list.innerHTML = '<div class="player-meta mt-8">' + t('admin.votes_view.empty') + '</div>';
+            return;
+        }
+        list.innerHTML = byUser.map(u => {
+            const ratingsHtml = Object.entries(u.votes || {})
+                .sort((a, b) => b[1] - a[1])
+                .map(([pid, rate]) => `<span class="badge badge-blue" style="margin:2px 4px 2px 0;font-size:0.7rem;">${escapeHtml(pid)}: ${rate}</span>`)
+                .join('');
+            const idLabel = u.custom_id || u.auto_id || u.user_id;
+            return `<div class="card" style="padding:8px 12px;margin-bottom:6px;">
+                <div><strong>${escapeHtml(u.username || ('User ' + u.user_id))}</strong>
+                <span class="player-meta">(${escapeHtml(String(idLabel))} \u00B7 ID: ${u.user_id})</span></div>
+                <div style="margin-top:4px;">${ratingsHtml}</div>
+            </div>`;
+        }).join('');
+    } catch (e) { toast(t('common.error')); summary.textContent = ''; }
+}
+
+function renderAdminResetVote() {
+    return `
+        <div class="admin-section">
+            <h3>\uD83D\uDD04 ${t('admin.reset_vote.heading')}</h3>
+            <p class="player-meta">${t('admin.reset_vote.note')}</p>
+            <div class="form-group">
+                <label>${t('admin.vote_adjust.poll_id')}</label>
+                <input type="text" id="reset-vote-poll-id" placeholder="poll_1735862400">
+            </div>
+            <div class="form-group">
+                <label>${t('admin.vote_adjust.user_id')}</label>
+                <input type="number" id="reset-vote-user-id" placeholder="123456">
+            </div>
+            <button class="btn-danger" id="btn-reset-vote">${t('admin.reset_vote.apply')}</button>
+        </div>`;
+}
+
+async function adminResetVote() {
+    const body = {
+        poll_id: document.getElementById('reset-vote-poll-id').value.trim(),
+        user_id: parseInt(document.getElementById('reset-vote-user-id').value),
+    };
+    if (!body.poll_id || !body.user_id) { toast(t('admin.vote_adjust.fill_all')); return; }
+    if (!confirm(t('admin.reset_vote.confirm') + ' ' + body.user_id + '?')) return;
+    try {
+        const data = await api('/api/admin/reset-vote', { method: 'POST', body: JSON.stringify(body) });
+        if (data.success) {
+            toast(t('admin.reset_vote.applied_toast'));
+            document.getElementById('reset-vote-poll-id').value = '';
+            document.getElementById('reset-vote-user-id').value = '';
+            await renderAdminTab();
+        } else { toast(data.error || t('common.error')); }
+    } catch (e) { toast(t('common.error')); }
+}
+
+function renderAdminRemoveVotes() {
+    return `
+        <div class="admin-section">
+            <h3>\uD83D\uDDD1\uFE0F ${t('admin.remove_votes.heading')}</h3>
+            <p class="player-meta">${t('admin.remove_votes.note')}</p>
+            <div class="form-group">
+                <label>${t('admin.vote_adjust.poll_id')}</label>
+                <input type="text" id="remove-votes-poll-id" placeholder="poll_1735862400">
+            </div>
+            <div class="form-group">
+                <label>${t('admin.vote_adjust.user_id')}</label>
+                <input type="number" id="remove-votes-user-id" placeholder="123456">
+            </div>
+            <button class="btn-danger" id="btn-remove-votes">${t('admin.remove_votes.apply')}</button>
+        </div>`;
+}
+
+async function adminRemoveUserVotes() {
+    const body = {
+        poll_id: document.getElementById('remove-votes-poll-id').value.trim(),
+        user_id: parseInt(document.getElementById('remove-votes-user-id').value),
+    };
+    if (!body.poll_id || !body.user_id) { toast(t('admin.vote_adjust.fill_all')); return; }
+    if (!confirm(t('admin.remove_votes.confirm') + ' ' + body.user_id + '?')) return;
+    try {
+        const data = await api('/api/admin/vote/remove', { method: 'POST', body: JSON.stringify(body) });
+        if (data.success) {
+            toast(t('admin.remove_votes.applied_toast'));
+            document.getElementById('remove-votes-poll-id').value = '';
+            document.getElementById('remove-votes-user-id').value = '';
+            await renderAdminTab();
+        } else { toast(data.error || t('common.error')); }
+    } catch (e) { toast(t('common.error')); }
+}
+
+function renderAdminChallenges() {
+    return `
+        <div class="admin-section">
+            <h3>\uD83C\uDFC6 ${t('admin.challenges.heading')}</h3>
+            <p class="player-meta">${t('admin.challenges.note')}</p>
+            <div class="form-group">
+                <label>${t('admin.challenges.title_field')}</label>
+                <input type="text" id="ch-title" placeholder="${t('admin.challenges.title_placeholder')}">
+            </div>
+            <div class="form-group">
+                <label>${t('admin.challenges.description')}</label>
+                <input type="text" id="ch-desc" placeholder="${t('admin.challenges.description_placeholder')}">
+            </div>
+            <div class="grid-2">
+                <div class="form-group">
+                    <label>${t('admin.challenges.type')}</label>
+                    <input type="text" id="ch-type" value="custom">
+                </div>
+                <div class="form-group">
+                    <label>${t('admin.challenges.target')}</label>
+                    <input type="number" id="ch-target" value="1" min="1">
+                </div>
+            </div>
+            <div class="grid-2">
+                <div class="form-group">
+                    <label>${t('admin.challenges.reward_xp')}</label>
+                    <input type="number" id="ch-xp" value="20" min="0">
+                </div>
+                <div class="form-group">
+                    <label>${t('admin.challenges.end_time')}</label>
+                    <input type="number" id="ch-end" placeholder="${t('admin.challenges.end_time_placeholder')}">
+                </div>
+            </div>
+            <button class="btn-primary" id="btn-create-challenge">\u2795 ${t('admin.challenges.create')}</button>
+
+            <div class="mt-16"><strong>${t('admin.challenges.toggle_heading')}</strong></div>
+            <div class="form-group">
+                <label>${t('admin.challenges.challenge_id')}</label>
+                <input type="number" id="ch-toggle-id" placeholder="1">
+            </div>
+            <div style="display:flex;gap:8px;">
+                <button class="btn-primary" id="btn-toggle-challenge-on">${t('admin.challenges.activate')}</button>
+                <button class="btn-danger" id="btn-toggle-challenge-off">${t('admin.challenges.deactivate')}</button>
+            </div>
+        </div>`;
+}
+
+async function adminCreateChallenge() {
+    const body = {
+        title: document.getElementById('ch-title').value.trim(),
+        description: document.getElementById('ch-desc').value.trim(),
+        type: document.getElementById('ch-type').value.trim() || 'custom',
+        target: parseInt(document.getElementById('ch-target').value) || 1,
+        reward_xp: parseInt(document.getElementById('ch-xp').value) || 20,
+    };
+    const endVal = document.getElementById('ch-end').value.trim();
+    if (endVal) body.end_time = parseFloat(endVal);
+    if (!body.title) { toast(t('admin.challenges.title_required')); return; }
+    try {
+        const data = await api('/api/admin/challenges/create', { method: 'POST', body: JSON.stringify(body) });
+        if (data.success) {
+            toast(`${t('admin.challenges.created_toast')} #${data.challenge_id}`);
+            document.getElementById('ch-title').value = '';
+            document.getElementById('ch-desc').value = '';
+            document.getElementById('ch-end').value = '';
+        } else { toast(data.error || t('common.error')); }
+    } catch (e) { toast(t('common.error')); }
+}
+
+async function adminToggleChallenge(active) {
+    const challenge_id = parseInt(document.getElementById('ch-toggle-id').value);
+    if (!challenge_id) { toast(t('admin.challenges.id_required')); return; }
+    try {
+        const data = await api('/api/admin/challenges/toggle', { method: 'POST', body: JSON.stringify({ challenge_id, active }) });
+        if (data.success) {
+            toast(active ? t('admin.challenges.activated_toast') : t('admin.challenges.deactivated_toast'));
+        } else { toast(data.error || t('common.error')); }
+    } catch (e) { toast(t('common.error')); }
+}
+
+// ──── End new admin sections ────
 
 async function adminAddBackground() {
     const body = {

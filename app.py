@@ -2884,6 +2884,32 @@ def api_admin_remove_user_votes(poll_id_override=None):
     return jsonify({"success": True})
 
 
+@app.get("/api/admin/polls")
+def api_admin_list_polls():
+    """List recent polls for admin view (any status)."""
+    _admin_check()
+    limit = request.args.get("limit", 20, type=int)
+    return jsonify({"success": True, "polls": list_polls(limit=limit)})
+
+
+@app.post("/api/admin/background/add")
+def api_admin_add_background():
+    """Add a new background image (and optionally make it default)."""
+    admin_id = _admin_check()
+    body = request.get_json(force=True)
+    label = (body.get("label") or "").strip() or "background"
+    url = (body.get("url") or "").strip()
+    is_default = bool(body.get("is_default", False))
+    if not url:
+        return jsonify({"success": False, "error": "url required"}), 400
+    add_background(label, url, admin_id, is_default)
+    if is_default:
+        set_config("default_background_url", url)
+    add_log(admin_id, "add_background",
+            details={"label": label, "url": url, "is_default": is_default})
+    return jsonify({"success": True})
+
+
 # ── run ────────────────────────────────────────────────────────────────
 
 def start_ngrok(port: int) -> str | None:
