@@ -707,6 +707,9 @@ def init_db():
             'api_error_count': '0',
             'awards_enabled': '1',
             'monitoring_admin_chat_id': '',
+            # UI: font preset broadcast to all clients via /api/config.
+            # Allowed values: system | sport | classic | modern.
+            'font_preset': 'system',
         }
         for k, v in defaults.items():
             _insert_ignore(conn, 'config', {'key': k, 'value': v}, ['key'])
