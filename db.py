@@ -619,6 +619,21 @@ def init_db():
                 if 'duplicate column' not in str(e).lower():
                     _log.warning("ALTER TABLE profiles ADD avatar failed: %s", e)
 
+        # ── telegram_photo_url column on profiles ──────────────
+        # Stores the user's Telegram profile photo URL (from
+        # tg.initDataUnsafe.user.photo_url). Refreshed on each app open.
+        # Same Postgres-vs-SQLite caveat as the avatar column above:
+        # Postgres aborts the surrounding transaction on a duplicate-column
+        # error, so use IF NOT EXISTS there.
+        if _DRIVER == 'postgres':
+            cur.execute("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS telegram_photo_url TEXT")
+        else:
+            try:
+                cur.execute("ALTER TABLE profiles ADD COLUMN telegram_photo_url TEXT")
+            except sqlite3.OperationalError as e:
+                if 'duplicate column' not in str(e).lower():
+                    _log.warning("ALTER TABLE profiles ADD telegram_photo_url failed: %s", e)
+
         # ── Postgres BIGINT migration for user_id columns ──────
         # Real Telegram user IDs already exceed 2^31; if any of these tables
         # were originally created with INTEGER (4-byte) before the BIGINT
@@ -769,7 +784,12 @@ def remove_admin(user_id: int):
 def list_admins() -> List[Dict]:
     conn = get_connection()
     try:
-        rows = conn.execute('SELECT * FROM admins ORDER BY added_at DESC').fetchall()
+        rows = conn.execute('''
+            SELECT a.*, p.first_name, p.telegram_photo_url
+            FROM admins a
+            LEFT JOIN profiles p ON p.user_id = a.user_id
+            ORDER BY a.added_at DESC
+        ''').fetchall()
         return [dict(r) for r in rows]
     finally:
         conn.close()
@@ -808,7 +828,8 @@ def get_or_create_profile(user_id: int, username: str = '', first_name: str = ''
 
 
 def update_profile(user_id: int, **kwargs):
-    allowed = {'username', 'first_name', 'last_name', 'custom_id', 'language', 'theme', 'notifications', 'background_url', 'avatar'}
+    allowed = {'username', 'first_name', 'last_name', 'custom_id', 'language', 'theme',
+               'notifications', 'background_url', 'avatar', 'telegram_photo_url'}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields:
         return
@@ -1277,6 +1298,7 @@ def get_voter_leaderboard(limit: int = 50) -> List[Dict]:
     try:
         rows = conn.execute('''
             SELECT p.user_id, p.username, p.first_name, p.custom_id, p.auto_id, p.avatar,
+                   p.telegram_photo_url,
                    COUNT(DISTINCT v.poll_id) as vote_count,
                    COUNT(v.id) as total_votes,
                    ROUND(AVG(v.rating), 2) as avg_rating

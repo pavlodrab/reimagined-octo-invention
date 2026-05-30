@@ -3041,7 +3041,7 @@ def api_admin_get_votes(poll_id):
     try:
         rows = conn.execute('''
             SELECT v.user_id, v.player_id, v.rating, v.batch_id, v.timestamp,
-                   p.username, p.first_name, p.custom_id, p.auto_id,
+                   p.username, p.first_name, p.custom_id, p.auto_id, p.telegram_photo_url,
                    pl.name as player_name, pl.photo_url
             FROM votes v
             LEFT JOIN profiles p ON p.user_id = v.user_id
@@ -3061,6 +3061,7 @@ def api_admin_get_votes(poll_id):
                     'username': v['username'] or v['first_name'] or f"User {uid}",
                     'custom_id': v['custom_id'],
                     'auto_id': v['auto_id'],
+                    'telegram_photo_url': v['telegram_photo_url'],
                     'votes': {},
                     'timestamp': v['timestamp'],
                 }
