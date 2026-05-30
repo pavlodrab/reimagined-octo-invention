@@ -186,6 +186,52 @@ var TRANSLATIONS = {
                 top5: 'Топ-5',
                 full: 'Полный список',
                 saved: 'Настройки канала сохранены!'
+            },
+            votes_view: {
+                heading: 'Просмотр голосов',
+                poll_id: 'Poll ID',
+                load: 'Показать голоса',
+                total_voters: 'Проголосовавших',
+                total_votes: 'Голосов всего',
+                empty: 'В этом опросе пока нет голосов.',
+                enter_poll_id: 'Введите Poll ID'
+            },
+            reset_vote: {
+                heading: 'Сбросить голос пользователя',
+                note: 'Удалит голоса юзера в опросе и позволит проголосовать заново. Действие логируется как «reset_vote».',
+                apply: 'Сбросить голос',
+                confirm: 'Сбросить голос пользователя',
+                applied_toast: 'Голос сброшен'
+            },
+            remove_votes: {
+                heading: 'Удалить все голоса юзера в опросе',
+                note: 'Жёсткое удаление голосов юзера в опросе. Логируется как «remove_votes» (для аудита).',
+                apply: 'Удалить голоса',
+                confirm: 'Удалить ВСЕ голоса пользователя',
+                applied_toast: 'Голоса удалены'
+            },
+            challenges: {
+                heading: 'Челленджи',
+                note: 'После создания получишь ID — используй его для активации/деактивации.',
+                title_field: 'Название',
+                title_placeholder: 'Угадай топ-3 матча',
+                title_required: 'Введите название',
+                description: 'Описание',
+                description_placeholder: 'Краткое описание',
+                type: 'Тип',
+                target: 'Цель (число)',
+                reward_xp: 'Награда (XP)',
+                end_time: 'End time (unix, опц.)',
+                end_time_placeholder: 'по умолчанию +7 дней',
+                create: 'Создать челлендж',
+                created_toast: 'Челлендж создан, ID:',
+                toggle_heading: 'Активация / деактивация',
+                challenge_id: 'Challenge ID',
+                id_required: 'Введите Challenge ID',
+                activate: 'Активировать',
+                deactivate: 'Деактивировать',
+                activated_toast: 'Челлендж активирован',
+                deactivated_toast: 'Челлендж деактивирован'
             }
         },
 
@@ -651,6 +697,52 @@ var TRANSLATIONS = {
                 top5: 'Top-5',
                 full: 'Full list',
                 saved: 'Channel settings saved!'
+            },
+            votes_view: {
+                heading: 'View votes',
+                poll_id: 'Poll ID',
+                load: 'Load votes',
+                total_voters: 'Total voters',
+                total_votes: 'Total votes',
+                empty: 'No votes in this poll yet.',
+                enter_poll_id: 'Enter Poll ID'
+            },
+            reset_vote: {
+                heading: "Reset user's vote",
+                note: "Removes the user's votes in the poll so they can vote again. Logged as \"reset_vote\".",
+                apply: 'Reset vote',
+                confirm: "Reset votes of user",
+                applied_toast: 'Vote reset'
+            },
+            remove_votes: {
+                heading: "Remove all of user's votes in poll",
+                note: "Hard-removes the user's votes in the poll. Logged as \"remove_votes\" (audit trail).",
+                apply: 'Remove votes',
+                confirm: "Remove ALL votes of user",
+                applied_toast: 'Votes removed'
+            },
+            challenges: {
+                heading: 'Challenges',
+                note: 'After creating you will get an ID — use it to toggle active state.',
+                title_field: 'Title',
+                title_placeholder: 'Guess match top-3',
+                title_required: 'Title required',
+                description: 'Description',
+                description_placeholder: 'Short description',
+                type: 'Type',
+                target: 'Target (number)',
+                reward_xp: 'Reward (XP)',
+                end_time: 'End time (unix, optional)',
+                end_time_placeholder: 'defaults to +7 days',
+                create: 'Create challenge',
+                created_toast: 'Challenge created, ID:',
+                toggle_heading: 'Activate / deactivate',
+                challenge_id: 'Challenge ID',
+                id_required: 'Challenge ID required',
+                activate: 'Activate',
+                deactivate: 'Deactivate',
+                activated_toast: 'Challenge activated',
+                deactivated_toast: 'Challenge deactivated'
             }
         },
 
