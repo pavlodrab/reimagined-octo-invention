@@ -6,6 +6,8 @@ from urllib.parse import parse_qs
 
 from flask import Flask, request, jsonify, send_from_directory, abort, g, has_request_context
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 import requests as http_requests
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -50,6 +52,39 @@ if _env_owner > 0:
         print(f"  ✓ owner_id synced from OWNER_ID env: {_env_owner}")
 else:
     print("  ⚠️  OWNER_ID env not set — admin endpoints will reject all callers until owner is bootstrapped via DB or bot.")
+
+
+# ── Rate limiting ──────────────────────────────────────────────────────
+# Per-user when authenticated, per-IP otherwise. Memory storage is fine for
+# single-process Flask; for multi-worker Gunicorn each worker keeps its own
+# counter (effective limit = N×workers). For higher accuracy use Redis
+# (RATELIMIT_STORAGE_URI=redis://...).
+
+def _rate_limit_key() -> str:
+    """Limiter key: 'user:<uid>' for verified Telegram users, else 'ip:<addr>'."""
+    uid = None
+    if has_request_context():
+        try:
+            uid = get_current_user_id()
+        except Exception:
+            uid = None
+    if uid:
+        return f"user:{uid}"
+    return f"ip:{get_remote_address()}"
+
+
+limiter = Limiter(
+    key_func=_rate_limit_key,
+    app=app,
+    # Generous default — per-route overrides apply to admin / write-heavy endpoints.
+    default_limits=[
+        os.getenv("RATE_LIMIT_DEFAULT_PER_MINUTE", "100 per minute"),
+        os.getenv("RATE_LIMIT_DEFAULT_PER_HOUR", "2000 per hour"),
+    ],
+    storage_uri=os.getenv("RATELIMIT_STORAGE_URI", "memory://"),
+    headers_enabled=True,  # adds X-RateLimit-* response headers
+    strategy="fixed-window",
+)
 
 
 # ── Challenge System ───────────────────────────────────────────────────
@@ -1256,6 +1291,7 @@ def api_current_poll():
 
 
 @app.post("/api/vote_batch")
+@limiter.limit("30 per minute")
 def api_vote_batch():
     uid = get_current_user_id()
     if not uid:
@@ -1311,6 +1347,7 @@ def api_vote_batch():
 
 
 @app.get("/api/stream/poll/<poll_id>")
+@limiter.exempt
 def api_stream_poll(poll_id):
     """Server-Sent Events stream for live poll updates."""
     # Validate poll exists
@@ -1740,6 +1777,7 @@ def api_backgrounds():
 
 
 @app.get("/api/health")
+@limiter.exempt
 def health():
     return jsonify({
         "ok": True,
@@ -2007,6 +2045,7 @@ def api_revote():
 
 
 @app.post("/api/admin/reset-vote")
+@limiter.limit("10 per minute")
 def api_admin_reset_vote():
     """Admin resets a user's vote to allow re-vote."""
     admin_id = _admin_check()
@@ -2597,6 +2636,7 @@ def _admin_check() -> int:
 
 
 @app.post("/api/admin/poll/create")
+@limiter.limit("10 per minute")
 def api_admin_create_poll():
     admin_id = _admin_check()
     body = request.get_json(force=True)
@@ -2641,6 +2681,7 @@ def api_admin_create_poll():
 
 
 @app.post("/api/admin/poll/close/<poll_id>")
+@limiter.limit("10 per minute")
 def api_admin_close_poll(poll_id):
     admin_id = _admin_check()
     close_poll(poll_id)
@@ -2861,6 +2902,7 @@ def api_awards_user(uid):
 
 
 @app.post("/api/admin/admins/add")
+@limiter.limit("5 per minute")
 def api_admin_add_admin():
     requester = _admin_check()
     body = request.get_json(force=True)
@@ -2873,6 +2915,7 @@ def api_admin_add_admin():
 
 
 @app.post("/api/admin/admins/remove")
+@limiter.limit("5 per minute")
 def api_admin_remove_admin():
     requester = _admin_check()
     body = request.get_json(force=True)
@@ -2933,6 +2976,7 @@ def api_admin_get_votes(poll_id):
 
 
 @app.post("/api/admin/vote/adjust")
+@limiter.limit("10 per minute")
 def api_admin_adjust_vote():
     """Adjust a user's vote and log it."""
     admin_id = _admin_check()
@@ -2948,6 +2992,7 @@ def api_admin_adjust_vote():
 
 
 @app.post("/api/admin/vote/remove")
+@limiter.limit("10 per minute")
 def api_admin_remove_user_votes(poll_id_override=None):
     """Remove all votes from a user in a poll."""
     admin_id = _admin_check()
