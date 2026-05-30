@@ -1849,6 +1849,35 @@ def api_profile_me():
     uid = get_current_user_id()
     if not uid:
         return jsonify({"success": False, "error": "unauthorized"}), 401
+
+    # Auto-create the profile on first /me hit so a brand-new user has a
+    # `chelsea-XXX` auto_id immediately — without this, anyone who opens
+    # the mini-app before casting their first vote sees `ID: —` because
+    # the profile row is only created inside the vote handler.
+    #
+    # Pull display fields from the verified initData (production) or from
+    # the X-Demo-User header (demo mode) so the row is created with real
+    # name/username when available.
+    username = first_name = last_name = ''
+    init_data = request.headers.get('X-Init-Data', '')
+    if init_data:
+        user = verify_init_data(init_data)
+        if user and int(user.get('id', 0)) == uid:
+            username = user.get('username') or ''
+            first_name = user.get('first_name') or ''
+            last_name = user.get('last_name') or ''
+    if not first_name and DEMO_MODE:
+        demo_json = request.headers.get('X-Demo-User', '')
+        if demo_json:
+            try:
+                claimed = json.loads(demo_json)
+                username = claimed.get('username') or ''
+                first_name = claimed.get('first_name') or ''
+                last_name = claimed.get('last_name') or ''
+            except Exception:
+                pass
+    get_or_create_profile(uid, username, first_name, last_name)
+
     return api_profile(uid)
 
 
