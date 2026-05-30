@@ -1,0 +1,10 @@
+; BIND zone file for drakelovc.indevs.in
+; Exported from Stackryze DNS on 2026-05-30T13:34:36.867Z
+; Zone status: active
+
+$ORIGIN drakelovc.indevs.in.
+$TTL 3600
+
+drakelovc.indevs.in. 3600   IN SOA    ns1.stackryze.com. hostmaster.stackryze.com. 2026053001 10800 3600 604800 3600
+drakelovc.indevs.in. 3600   IN NS     ns1.stackryze.com.
+drakelovc.indevs.in. 3600   IN NS     ns2.stackryze.com.

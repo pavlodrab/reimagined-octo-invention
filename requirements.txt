@@ -1,0 +1,5 @@
+Flask==2.3.3
+flask-cors==4.0.0
+python-telegram-bot==20.6
+requests==2.31.0
+apscheduler>=3.10.0

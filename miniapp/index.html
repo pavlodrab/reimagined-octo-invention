@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="ru" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Челси Голосование</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ═══ Header ═══ -->
+<header id="header">
+    <img src="https://upload.wikimedia.org/wikipedia/en/thumb/c/cc/Chelsea_FC.svg/1200px-Chelsea_FC.svg.png" alt="Chelsea" id="logo" onerror="this.style.display='none'">
+    <h1 id="bot-name">Челси Голосование</h1>
+</header>
+
+<!-- ═══ Tab Navigation ═══ -->
+<nav id="tabs">
+    <button class="tab-btn active" data-tab="vote">
+        <span class="tab-icon">⚽</span>
+        <span class="tab-label">Голосовать</span>
+    </button>
+    <button class="tab-btn" data-tab="other">
+        <span class="tab-icon">📋</span>
+        <span class="tab-label">Прочие</span>
+    </button>
+    <button class="tab-btn" data-tab="profile">
+        <span class="tab-icon">👤</span>
+        <span class="tab-label">Профиль</span>
+    </button>
+    <button class="tab-btn" data-tab="stats">
+        <span class="tab-icon">📈</span>
+        <span class="tab-label">Stats</span>
+    </button>
+    <button class="tab-btn" data-tab="settings">
+        <span class="tab-icon">⚙️</span>
+        <span class="tab-label">Настройки</span>
+    </button>
+    <button class="tab-btn admin-only" data-tab="admin" id="admin-tab-btn" style="display:none">
+        <span class="tab-icon">🛡️</span>
+        <span class="tab-label">Админ</span>
+    </button>
+</nav>
+
+<!-- ═══ Main Content ═══ -->
+<main id="content">
+
+    <!-- ── Tab 1: Vote ── -->
+    <section id="vote-tab" class="tab-content active">
+        <div id="vote-loading" class="loading">Загрузка...</div>
+        <div id="vote-content" style="display:none">
+            <div id="match-header"></div>
+            <div id="progress-bar"><div id="progress-fill"></div><span id="progress-text"></span></div>
+            <div id="players-list"></div>
+            <div id="vote-error" class="msg error" style="display:none"></div>
+            <button id="submit-btn" class="btn-primary" disabled>Отправить голос</button>
+            <div id="vote-success" class="msg success" style="display:none">✅ Голос принят!</div>
+        </div>
+    </section>
+
+    <!-- ── Tab 2: Other polls ── -->
+    <section id="other-tab" class="tab-content">
+        <h2>Прочие голосования</h2>
+        <div id="other-loading" class="loading">Загрузка...</div>
+        <div id="other-content" style="display:none"></div>
+    </section>
+
+    <!-- ── Tab 3: Profile ── -->
+    <section id="profile-tab" class="tab-content">
+        <h2>Мой профиль</h2>
+        <div id="profile-loading" class="loading">Загрузка...</div>
+        <div id="profile-content" style="display:none"></div>
+    </section>
+
+    <!-- ── Tab 4: Settings ── -->
+    <section id="settings-tab" class="tab-content">
+        <h2>Настройки</h2>
+        <div id="settings-content"></div>
+    </section>
+
+    <!-- ── Tab: Stats ── -->
+    <section id="stats-tab" class="tab-content">
+        <h2>Stats</h2>
+        <div id="stats-loading" class="loading">Loading...</div>
+        <div id="stats-content" style="display:none"></div>
+    </section>
+
+    <!-- ── Tab 5: Admin ── -->
+    <section id="admin-tab" class="tab-content">
+        <h2>🛡️ Админ-панель</h2>
+        <div id="admin-content"></div>
+    </section>
+
+</main>
+
+<!-- ═══ Toast notification ═══ -->
+<div id="toast" style="display:none"></div>
+
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="i18n.js"></script>
+<script src="script.js"></script>
+</body>
+</html>

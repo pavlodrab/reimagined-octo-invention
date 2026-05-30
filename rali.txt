@@ -1,0 +1,36 @@
+# Railway Deploy Instructions
+
+## 1. Push to GitHub
+cd ~/Desktop/67
+git init
+git add -A
+git commit -m "Chelsea voting bot - Mini App"
+git remote add origin https://github.com/pavlodrab/reimagined-octo-invention.git
+git push -u origin main
+
+## 2. Deploy on Railway
+1. Go to https://railway.app
+2. New Project → Deploy from GitHub repo
+3. Select: pavlodrab/chelsea-bot
+4. Add environment variables:
+   - TELEGRAM_TOKEN=your_bot_token
+   - OWNER_ID=your_telegram_id
+   - SSTATS_TOKEN=sjzgn3bbco67pk8j
+5. Railway auto-detects railway.json and runs: python app.py
+6. Get URL like: https://chelsea-bot-production.up.railway.app
+
+## 3. Connect domain drakelovc.indevs.in
+1. In Railway: Settings → Domains → Custom Domain
+2. Add: drakelovc.indevs.in
+3. Railway gives CNAME or IP
+4. In Stackryze DNS, add record:
+   - Type: CNAME
+   - Name: drakelovc
+   - Value: chelsea-bot-production.up.railway.app
+   - TTL: 3600
+5. Wait 5-10 min for DNS + SSL
+
+## 4. Bot setup
+1. Go to @BotFather in Telegram
+2. /setdomain → https://drakelovc.indevs.in
+3. /setmenubutton → URL: https://drakelovc.indevs.in
