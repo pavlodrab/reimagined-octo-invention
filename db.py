@@ -3,7 +3,11 @@ import time
 import json
 from typing import Optional, List, Dict, Any
 
-DB_PATH = 'chelsea_bot.db'
+import os
+
+# Use /tmp for SQLite on Railway (ephemeral), or /app/data if volume mounted
+DB_DIR = os.getenv('DB_DIR', '/tmp')
+DB_PATH = os.path.join(DB_DIR, 'chelsea_bot.db')
 
 
 def get_connection():
