@@ -4,7 +4,7 @@ app.py  —  Flask backend for Chelsea Voting Mini App
 import os, json, time, uuid, hashlib, hmac, html, atexit, threading, queue, math
 from urllib.parse import parse_qs
 
-from flask import Flask, request, jsonify, send_from_directory, abort
+from flask import Flask, request, jsonify, send_from_directory, abort, g, has_request_context
 from flask_cors import CORS
 import requests as http_requests
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -19,6 +19,24 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 MINI_APP_URL   = os.getenv("MINI_APP_URL", "")
 SSTATS_TOKEN   = os.getenv("SSTATS_TOKEN", "")
 CHELSEA_ID     = 49  # sstats team ID
+
+# DEMO_MODE controls whether unverified user identity (X-Demo-User header,
+# ?user_id= query param) is accepted. Default OFF in production — only verified
+# Telegram WebApp initData is trusted for authentication.
+# For local browser-based development set DEMO_MODE=1.
+DEMO_MODE = os.getenv("DEMO_MODE", "0").lower() in ("1", "true", "yes", "on")
+
+# Maximum age of initData payload (seconds). Per Telegram docs the field
+# auth_date should be checked to prevent replay attacks. 24h is a balance
+# between UX (long-lived session) and risk window.
+MAX_INIT_DATA_AGE_SECONDS = int(os.getenv("INIT_DATA_MAX_AGE", str(24 * 60 * 60)))
+
+if not TELEGRAM_TOKEN and not DEMO_MODE:
+    print("  ⚠️  TELEGRAM_TOKEN is empty and DEMO_MODE is off — all admin endpoints "
+          "will reject every caller (no way to verify initData signatures).")
+if DEMO_MODE:
+    print("  ⚠️  DEMO_MODE=1 — X-Demo-User and ?user_id= identity fallbacks are accepted. "
+          "MUST be off in production.")
 
 init_db()
 
@@ -557,50 +575,109 @@ def check_auto_close_polls():
 # ── Telegram initData verification ─────────────────────────────────────
 
 def verify_init_data(init_data: str) -> dict | None:
-    try:
-        parsed = parse_qs(init_data)
-        hash_val = parsed.get('hash', [''])[0]
-        pairs = [f"{k}={v[0]}" for k, v in parsed.items() if k != 'hash']
-        pairs.sort()
-        data_check_string = '\n'.join(pairs)
-        secret = hmac.new(b"WebAppData", TELEGRAM_TOKEN.encode(), hashlib.sha256).digest()
-        calc_hash = hmac.new(secret, data_check_string.encode(), hashlib.sha256).hexdigest()
-        if calc_hash != hash_val:
-            return None
-        user_json = parsed.get('user', ['{}'])[0]
-        return json.loads(user_json)
-    except Exception:
+    """Verify a Telegram WebApp initData payload and return the user dict.
+
+    Implements the algorithm from
+    https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
+
+    Returns:
+        dict with the validated user fields (id, username, first_name, ...) on
+        success, or None on any failure (bad signature, stale auth_date,
+        malformed payload, missing token).
+    """
+    if not TELEGRAM_TOKEN or not init_data:
         return None
+
+    # parse_qs URL-decodes values, which is what the spec requires for the
+    # data-check-string. strict_parsing=True rejects malformed input.
+    try:
+        parsed = parse_qs(init_data, strict_parsing=True)
+    except ValueError:
+        return None
+
+    received_hash = parsed.get('hash', [''])[0]
+    if not received_hash:
+        return None
+
+    # Sort {key=value} pairs lexicographically by key, join with '\n'
+    pairs = sorted(f"{k}={v[0]}" for k, v in parsed.items() if k != 'hash')
+    data_check_string = '\n'.join(pairs)
+
+    secret = hmac.new(b"WebAppData", TELEGRAM_TOKEN.encode(), hashlib.sha256).digest()
+    expected_hash = hmac.new(secret, data_check_string.encode(), hashlib.sha256).hexdigest()
+
+    # Constant-time comparison
+    if not hmac.compare_digest(expected_hash, received_hash):
+        return None
+
+    # Freshness: auth_date must be within the allowed window.
+    # This prevents replay of an intercepted initData.
+    auth_date_str = parsed.get('auth_date', [''])[0]
+    try:
+        auth_date = int(auth_date_str)
+    except (ValueError, TypeError):
+        return None
+    age = time.time() - auth_date
+    if age < -60 or age > MAX_INIT_DATA_AGE_SECONDS:
+        return None
+
+    # Parse user payload — also enforce that it has a numeric id.
+    user_str = parsed.get('user', [''])[0]
+    if not user_str:
+        return None
+    try:
+        user = json.loads(user_str)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(user, dict) or not isinstance(user.get('id'), int):
+        return None
+
+    return user
 
 
 def get_current_user_id() -> int | None:
-    # 1) Real Telegram initData
+    """Return the authenticated Telegram user_id, or None.
+
+    Production (DEMO_MODE=0): only verified initData (X-Init-Data header) is
+    accepted. Identity-claim headers / query params / body fields are ignored.
+
+    Demo mode (DEMO_MODE=1): X-Demo-User header and ?user_id= query param
+    are also accepted, in that order. Used for local browser dev only.
+    """
+    # Per-request cache: avoid HMAC-validating the same payload multiple times
+    # within one request handler.
+    if has_request_context() and 'cached_uid' in g:
+        return g.cached_uid
+
+    uid = None
+
+    # 1) Trusted source: verified Telegram WebApp initData
     init_data = request.headers.get('X-Init-Data', '')
     if init_data:
         user = verify_init_data(init_data)
         if user:
-            return user.get('id')
-    # 2) Demo mode header
-    demo_json = request.headers.get('X-Demo-User', '')
-    if demo_json:
-        try:
-            return int(json.loads(demo_json).get('id', 0))
-        except Exception:
-            pass
-    # 3) Query param (GET)
-    uid = request.args.get('user_id', type=int)
-    if uid:
-        return uid
-    # 4) JSON body (POST) — for admin create
-    if request.is_json:
-        try:
-            body = request.get_json(silent=True) or {}
-            uid = body.get('user_id')
-            if uid:
-                return int(uid)
-        except Exception:
-            pass
-    return None
+            uid = int(user['id'])
+
+    # 2) Demo-only identity fallbacks. NEVER trusted in production — these
+    # let the caller name any user_id with no proof, so they must be gated
+    # by an explicit DEMO_MODE flag.
+    if uid is None and DEMO_MODE:
+        demo_json = request.headers.get('X-Demo-User', '')
+        if demo_json:
+            try:
+                claimed = int(json.loads(demo_json).get('id', 0))
+                if claimed > 0:
+                    uid = claimed
+            except Exception:
+                pass
+        if uid is None:
+            qp = request.args.get('user_id', type=int)
+            if qp and qp > 0:
+                uid = qp
+
+    if has_request_context():
+        g.cached_uid = uid
+    return uid
 
 
 def require_admin() -> int:
