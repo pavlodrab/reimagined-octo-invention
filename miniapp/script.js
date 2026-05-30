@@ -186,13 +186,23 @@ const AVATARS = [
     { emoji: '\uD83D\uDC8E', bg: 'var(--blue-light)', label: 'Diamond' },
 ];
 
-function getAvatarHtml(avatarIndex, size) {
+function getAvatarHtml(avatarIndex, size, photoUrl) {
+    var s = size || 48;
+    // Tier 1: real Telegram profile photo if we have a URL.
+    if (photoUrl && typeof photoUrl === 'string' && photoUrl.length > 0) {
+        // Quote-escape the URL to be safe inside an HTML attribute.
+        var safe = String(photoUrl).replace(/"/g, '&quot;');
+        return '<img class="tg-avatar" src="' + safe + '" ' +
+               'style="width:' + s + 'px;height:' + s + 'px;border-radius:50%;object-fit:cover;display:block;" ' +
+               'onerror="this.outerHTML=\'\\u003Cdiv style=&quot;width:' + s + 'px;height:' + s + 'px;border-radius:50%;background:var(--blue);color:#fff;display:flex;align-items:center;justify-content:center;font-size:' + Math.round(s * 0.4) + 'px;font-weight:700;&quot;\\u003E?\\u003C/div\\u003E\'">';
+    }
+    // Tier 2: chosen emoji avatar
     var idx = parseInt(avatarIndex) || 0;
     if (idx < 0 || idx >= AVATARS.length) idx = 0;
     var avatar = AVATARS[idx];
-    var s = size || 48;
     var fontSize = Math.round(s * 0.55);
     if (idx === 0) {
+        // Tier 3: initials placeholder (no Telegram photo, no chosen emoji)
         var initial = ((state.firstName || '?')[0] + ((state.lastName || '')[0] || '')).toUpperCase();
         return '<div style="width:' + s + 'px;height:' + s + 'px;border-radius:50%;background:' + avatar.bg + ';color:#fff;display:flex;align-items:center;justify-content:center;font-size:' + Math.round(s * 0.4) + 'px;font-weight:700;">' + initial + '</div>';
     }
@@ -429,7 +439,16 @@ async function init() {
         try {
             await api('/api/profile/update', {
                 method: 'POST',
-                body: JSON.stringify({ username: state.username, first_name: state.firstName, last_name: state.lastName }),
+                body: JSON.stringify({
+                    username: state.username,
+                    first_name: state.firstName,
+                    last_name: state.lastName,
+                    // Sync the Telegram profile photo URL into our DB. This
+                    // lets leaderboards / admin lists render real avatars
+                    // for everyone who has opened the mini-app at least
+                    // once.
+                    telegram_photo_url: state.telegramPhotoUrl || '',
+                }),
             });
         } catch (_) {}
 
@@ -452,6 +471,11 @@ async function init() {
             state.username = u.username || '';
             state.firstName = u.first_name || '';
             state.lastName  = u.last_name || '';
+            // Bot API 7.2+ exposes the user's profile photo URL when the
+            // mini-app was opened via a menu/keyboard/inline button. We
+            // store it in state and ship it to the backend so leaderboards
+            // and admin views can render it for everyone too.
+            state.telegramPhotoUrl = u.photo_url || '';
         }
         state.initData = tg.initData || '';
 
@@ -1915,9 +1939,10 @@ async function renderStatsTab() {
             if (consistency >= 0.7) badges += '<span class="badge badge-success" style="font-size:0.65rem;padding:2px 6px;">' + t('profile.badges.seer') + '</span>';
             if (consistency <= 0.3 && totalVotes > 0) badges += '<span class="badge badge-danger" style="font-size:0.65rem;padding:2px 6px;">' + t('profile.badges.rebel') + '</span>';
 
+            var avatarMarkup = getAvatarHtml(voter.avatar || 0, 32, voter.telegram_photo_url);
             html += '<div class="leaderboard-row">' +
                 '<div class="leaderboard-rank">' + (i < 3 ? '<span class="medal-emoji">' + ['\uD83E\uDD47','\uD83E\uDD48','\uD83E\uDD49'][i] + '</span>' : (i + 1)) + '</div>' +
-                '<div class="player-photo-placeholder" style="width:32px;height:32px;font-size:0.85rem;flex-shrink:0;">' + initial + '</div>' +
+                '<div style="flex-shrink:0;">' + avatarMarkup + '</div>' +
                 '<div class="leaderboard-info">' +
                     '<div class="leaderboard-name">' + displayName + ' ' + badges + '</div>' +
                     '<div class="leaderboard-stats">' + totalVotes + ' ' + t('profile.votes_count').toLowerCase() + '</div>' +
@@ -2252,8 +2277,8 @@ async function renderProfileTab() {
         <!-- Avatar selector -->
         <div class="card text-center">
             <h3 style="margin-bottom:12px;">${t('customization.choose_avatar')}</h3>
-            <div class="avatar-large" style="background:${AVATARS[currentAvatar].bg};${currentAvatar === 0 ? 'color:#fff;font-weight:700;' : ''}">
-                ${currentAvatar === 0 ? ((state.firstName || '?')[0] + ((state.lastName || '')[0] || '')).toUpperCase() : AVATARS[currentAvatar].emoji}
+            <div class="avatar-large-wrap">
+                ${getAvatarHtml(currentAvatar, 96, p.telegram_photo_url || state.telegramPhotoUrl)}
             </div>
             ${avatarGridHtml}
         </div>
@@ -2827,7 +2852,8 @@ function renderAdminPolls() {
 function renderAdminAdmins() {
     let adminsHtml = state.allAdmins.map(a =>
         `<div class="card" style="padding:8px 14px;display:flex;align-items:center;gap:10px;">
-            <span style="flex:1">${a.username || a.user_id} <span class="player-meta">(ID: ${a.user_id})</span></span>
+            <div style="flex-shrink:0;">${getAvatarHtml(0, 32, a.telegram_photo_url)}</div>
+            <span style="flex:1">${a.username || a.first_name || a.user_id} <span class="player-meta">(ID: ${a.user_id})</span></span>
             <button class="btn-danger" style="padding:4px 10px;font-size:0.75rem"
                 onclick="adminRemoveAdmin(${a.user_id})">${t('admin.admins.remove')}</button>
         </div>`
