@@ -1,10 +1,16 @@
 """
 bot.py  —  Telegram entry point for Chelsea Voting Mini App
 """
+import logging
 import os
 from telegram import Update, WebAppInfo, KeyboardButton, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from db import *
+
+from logging_setup import init_logging
+
+init_logging()
+logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN  = os.getenv("TELEGRAM_TOKEN", "")
 MINI_APP_URL    = os.getenv("MINI_APP_URL", "https://your-domain.com")
@@ -269,7 +275,7 @@ def main():
     app.add_handler(CommandHandler("admin_add", admin_add_cmd))
     app.add_handler(CommandHandler("admin_remove", admin_remove_cmd))
     app.add_handler(CommandHandler("admins", admins_cmd))
-    print("Bot started...")
+    logger.info("Bot started (polling)")
     app.run_polling()
 
 

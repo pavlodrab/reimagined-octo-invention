@@ -3,7 +3,12 @@ import time
 import json
 import re
 import sqlite3
+import logging
 from typing import Optional, List, Dict, Any
+
+# Underscore prefix prevents this from being re-exported into modules that use
+# `from db import *`. Other modules in the project must define their own logger.
+_log = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────────────────────────────
 # Driver selection
@@ -513,8 +518,11 @@ def init_db():
         else:
             try:
                 cur.execute("ALTER TABLE profiles ADD COLUMN avatar TEXT DEFAULT '0'")
-            except Exception:
-                pass  # column already exists
+            except sqlite3.OperationalError as e:
+                # Expected when column already exists ("duplicate column name").
+                # Anything else we log so it isn't silently lost.
+                if 'duplicate column' not in str(e).lower():
+                    _log.warning("ALTER TABLE profiles ADD avatar failed: %s", e)
 
         # ── default config values ───────────────────────────────
         import os as _os
