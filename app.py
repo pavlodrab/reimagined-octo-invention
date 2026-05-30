@@ -8,6 +8,13 @@ from flask import Flask, request, jsonify, send_from_directory, abort, g, has_re
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+
+from logging_setup import init_logging, install_request_id_middleware
+import logging
+
+# Initialise root logging BEFORE the rest of the app starts emitting messages.
+init_logging()
+logger = logging.getLogger(__name__)
 import requests as http_requests
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -16,6 +23,7 @@ from db import *
 # ── Flask app ──────────────────────────────────────────────────────────
 app = Flask(__name__, static_folder='miniapp', static_url_path='')
 CORS(app)
+install_request_id_middleware(app)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 MINI_APP_URL   = os.getenv("MINI_APP_URL", "")
@@ -34,11 +42,15 @@ DEMO_MODE = os.getenv("DEMO_MODE", "0").lower() in ("1", "true", "yes", "on")
 MAX_INIT_DATA_AGE_SECONDS = int(os.getenv("INIT_DATA_MAX_AGE", str(24 * 60 * 60)))
 
 if not TELEGRAM_TOKEN and not DEMO_MODE:
-    print("  ⚠️  TELEGRAM_TOKEN is empty and DEMO_MODE is off — all admin endpoints "
-          "will reject every caller (no way to verify initData signatures).")
+    logger.warning(
+        "TELEGRAM_TOKEN is empty and DEMO_MODE is off — all admin endpoints "
+        "will reject every caller (no way to verify initData signatures)."
+    )
 if DEMO_MODE:
-    print("  ⚠️  DEMO_MODE=1 — X-Demo-User and ?user_id= identity fallbacks are accepted. "
-          "MUST be off in production.")
+    logger.warning(
+        "DEMO_MODE=1 — X-Demo-User and ?user_id= identity fallbacks are accepted. "
+        "MUST be off in production."
+    )
 
 init_db()
 
@@ -49,9 +61,10 @@ if _env_owner > 0:
     _db_owner = get_owner_id()
     if _db_owner != _env_owner:
         set_config('owner_id', str(_env_owner))
-        print(f"  ✓ owner_id synced from OWNER_ID env: {_env_owner}")
+        logger.info("owner_id synced from OWNER_ID env: %s", _env_owner)
 else:
-    print("  ⚠️  OWNER_ID env not set — admin endpoints will reject all callers until owner is bootstrapped via DB or bot.")
+    logger.warning("OWNER_ID env not set — admin endpoints will reject all callers "
+                   "until owner is bootstrapped via DB or bot.")
 
 
 # ── Rate limiting ──────────────────────────────────────────────────────
@@ -256,8 +269,13 @@ def send_telegram_message(chat_id, text, reply_markup=None):
         payload["reply_markup"] = json.dumps(reply_markup)
     try:
         r = http_requests.post(url, json=payload, timeout=10)
-        return r.json() if r.status_code == 200 else None
+        if r.status_code != 200:
+            logger.warning("Telegram sendMessage to %s failed: status=%s body=%s",
+                           chat_id, r.status_code, r.text[:200])
+            return None
+        return r.json()
     except Exception:
+        logger.exception("Telegram sendMessage to %s raised", chat_id)
         return None
 
 
@@ -547,9 +565,9 @@ def generate_post_match_report(poll_id):
         # Log the error and increment counter so failures are visible
         try:
             _increment_api_error_count()
-            app.logger.error(f"generate_post_match_report failed: {e}")
+            logger.exception("generate_post_match_report failed")
         except Exception:
-            pass
+            logger.exception("error counter increment failed")
 
 
 def announce_match_to_channel(poll_title, poll_id):
@@ -736,8 +754,10 @@ def sstats(path, params=None):
             if d.get('status') == 'OK':
                 return d.get('data')
         # Non-200 or non-OK status: increment error counter
+        logger.warning("sstats %s returned status=%s", path, r.status_code)
         _increment_api_error_count()
     except Exception:
+        logger.exception("sstats %s call raised", path)
         _increment_api_error_count()
     return None
 
@@ -749,7 +769,7 @@ def _increment_api_error_count():
         count = int(cfg.get('api_error_count', '0'))
         set_config('api_error_count', str(count + 1))
     except Exception:
-        pass
+        logger.exception("failed to increment api_error_count")
 
 
 def get_chelsea_players_from_game(game_id: str) -> list:
@@ -1051,9 +1071,9 @@ def generate_pre_match_analytics(game_id, poll_id):
         # Log the error and increment counter so failures are visible
         try:
             _increment_api_error_count()
-            app.logger.error(f"generate_pre_match_analytics failed: {e}")
+            logger.exception("generate_pre_match_analytics failed")
         except Exception:
-            pass
+            logger.exception("error counter increment failed")
 
 
 # ── Auto-create poll after Chelsea game ────────────────────────────────
@@ -3048,10 +3068,10 @@ def start_ngrok(port: int) -> str | None:
             ngrok.set_auth_token(token)
         tunnel = ngrok.connect(port, "http")
         url = tunnel.public_url
-        print(f"  🌍 ngrok: {url}")
+        logger.info("ngrok tunnel: %s", url)
         return url
     except Exception as e:
-        print(f"  ⚠️  ngrok: {e}")
+        logger.warning("ngrok unavailable: %s", e)
         return None
 
 
@@ -3364,8 +3384,9 @@ scheduler.add_job(scheduled_tasks, 'interval', minutes=30, id='scheduled_tasks')
 # Start scheduler at module level for WSGI/Railway deployment
 try:
     scheduler.start()
+    logger.info("Background scheduler started")
 except Exception:
-    pass
+    logger.exception("Background scheduler failed to start")
 
 atexit.register(lambda: scheduler.shutdown(wait=False) if scheduler.running else None)
 
@@ -3375,7 +3396,7 @@ if __name__ == "__main__":
 
     railway_env = os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_STATIC_URL")
     if railway_env:
-        print(f"\n  🚂 Railway (port {port})")
+        logger.info("Starting on Railway (port %d)", port)
     else:
         url = start_ngrok(port)
         if url:
@@ -3387,9 +3408,8 @@ if __name__ == "__main__":
         if not scheduler.running:
             scheduler.start()
     except Exception:
-        pass
+        logger.exception("scheduler.start() in __main__ failed")
 
-    print(f"  🚀 http://localhost:{port}")
-    print(f"  📍 /api/health\n")
+    logger.info("Listening on http://localhost:%d (health: /api/health)", port)
 
     app.run(host="0.0.0.0", port=port, debug=False)
