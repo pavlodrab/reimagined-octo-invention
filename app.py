@@ -22,6 +22,17 @@ CHELSEA_ID     = 49  # sstats team ID
 
 init_db()
 
+# Bootstrap owner from OWNER_ID env var (env is single source of truth for owner).
+# Handles "OWNER_ID set after first deploy" — the env wins over previously seeded DB config.
+_env_owner = int(os.getenv('OWNER_ID', '0') or '0')
+if _env_owner > 0:
+    _db_owner = get_owner_id()
+    if _db_owner != _env_owner:
+        set_config('owner_id', str(_env_owner))
+        print(f"  ✓ owner_id synced from OWNER_ID env: {_env_owner}")
+else:
+    print("  ⚠️  OWNER_ID env not set — admin endpoints will reject all callers until owner is bootstrapped via DB or bot.")
+
 
 # ── Challenge System ───────────────────────────────────────────────────
 
@@ -2503,11 +2514,6 @@ def _admin_check() -> int:
     uid = get_current_user_id()
     if not uid:
         abort(401)
-    # Auto-grant admin if owner_id is 0 (first run / demo mode)
-    owner = get_owner_id()
-    if owner == 0:
-        set_config('owner_id', str(uid))
-        add_log(uid, 'auto_grant_admin', details={'reason': 'first_run'})
     if not is_admin(uid):
         abort(403)
     return uid
