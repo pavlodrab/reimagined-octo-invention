@@ -107,8 +107,14 @@ def _translate_sql(sql: str) -> str:
     """Translate SQLite SQL to Postgres dialect. No-op for SQLite driver."""
     if _DRIVER == 'sqlite':
         return sql
-    # DDL: AUTOINCREMENT integer PK → BIGSERIAL
+    # DDL: AUTOINCREMENT integer PK -> BIGSERIAL (must run before the generic
+    # INTEGER -> BIGINT replacement, because BIGSERIAL is implicitly BIGINT).
     sql = sql.replace('INTEGER PRIMARY KEY AUTOINCREMENT', 'BIGSERIAL PRIMARY KEY')
+    # Telegram user IDs already exceed 2^31 (Postgres signed INTEGER max is
+    # 2,147,483,647 ~= 2.1B, while real Telegram IDs are past 6B and rising).
+    # Convert every plain INTEGER column to BIGINT so we never hit
+    # NumericValueOutOfRange on user_id / chat_id / etc.
+    sql = re.sub(r'\bINTEGER\b', 'BIGINT', sql)
     # Type: SQLite REAL is 8-byte; Postgres REAL is 4-byte (loses Unix-time precision).
     sql = re.sub(r'\bREAL\b', 'DOUBLE PRECISION', sql)
     # Param placeholders
@@ -174,6 +180,15 @@ class _Conn:
     def close(self):
         if self._pool is not None:
             try:
+                # Roll back any transaction the caller left implicitly open
+                # (SELECT-only request handlers don't COMMIT, leaving the
+                # connection in INTRANS state which makes the pool emit a
+                # warning when it cleans up). Doing it explicitly here keeps
+                # the pool quiet and the connection clean for the next user.
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass
                 self._pool.putconn(self._conn)
                 return
             except Exception:
@@ -603,6 +618,55 @@ def init_db():
                 # Anything else we log so it isn't silently lost.
                 if 'duplicate column' not in str(e).lower():
                     _log.warning("ALTER TABLE profiles ADD avatar failed: %s", e)
+
+        # ── Postgres BIGINT migration for user_id columns ──────
+        # Real Telegram user IDs already exceed 2^31; if any of these tables
+        # were originally created with INTEGER (4-byte) before the BIGINT
+        # translation landed, INSERTs of legitimate Telegram IDs raise
+        # NumericValueOutOfRange. ALTER COLUMN TYPE BIGINT is idempotent
+        # (BIGINT -> BIGINT is a no-op) so it's safe to run on every boot.
+        if _DRIVER == 'postgres':
+            user_id_columns = [
+                ('profiles',           'user_id'),
+                ('admins',             'user_id'),
+                ('admins',             'added_by'),
+                ('admin_logs',         'admin_user_id'),
+                ('admin_logs',         'target_user_id'),
+                ('votes',              'user_id'),
+                ('predictions',        'user_id'),
+                ('prediction_results', 'user_id'),
+                ('mini_games',         'user_id'),
+                ('referrals',          'referrer_user_id'),
+                ('referrals',          'referred_user_id'),
+                ('notification_prefs', 'user_id'),
+                ('reminders_sent',     'user_id'),
+                ('xp_log',             'user_id'),
+                ('user_xp',            'user_id'),
+                ('streaks',            'user_id'),
+                ('challenge_progress', 'user_id'),
+                ('awards',             'user_id'),
+                ('challenges',         'created_by'),
+            ]
+            for table, col in user_id_columns:
+                try:
+                    cur.execute(f'ALTER TABLE {table} ALTER COLUMN {col} TYPE BIGINT')
+                except Exception as e:
+                    # Some columns may not exist on older deploys, or the
+                    # table itself may not exist yet. We log at debug so the
+                    # boot log isn't spammed.
+                    msg = str(e)
+                    if 'does not exist' in msg.lower():
+                        _log.debug("ALTER %s.%s -> BIGINT skipped (not present): %s",
+                                   table, col, msg)
+                    else:
+                        _log.warning("ALTER %s.%s -> BIGINT failed: %s",
+                                     table, col, msg)
+                    # A failed ALTER aborts the transaction in Postgres;
+                    # roll back so subsequent statements aren't poisoned.
+                    try:
+                        conn._conn.rollback() if hasattr(conn, '_conn') else conn.rollback()
+                    except Exception:
+                        pass
 
         # ── default config values ───────────────────────────────
         import os as _os
