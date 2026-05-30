@@ -1318,19 +1318,41 @@ def get_voter_leaderboard(limit: int = 50) -> List[Dict]:
 
 
 def get_season_stats(limit: int = 50) -> List[Dict]:
-    """Avg rating per player across all closed polls."""
+    """Avg rating per player across all closed polls.
+
+    Two things to be careful with here:
+
+    1. Postgres GROUP BY strictness — `pl.name` and `pl.photo_url` are not
+       functionally dependent on the GROUP BY key (`v.player_id` is not the
+       primary key of `players`; that table has UNIQUE(player_id, match_id),
+       so multiple rows can share the same player_id). Postgres rejects this
+       with `column "pl.name" must appear in the GROUP BY clause`. Wrapping
+       both columns in `MAX()` makes the query valid on Postgres while
+       keeping it valid on SQLite (SQLite tolerates bare columns under
+       GROUP BY but is fine with MAX too).
+
+    2. Row multiplication — joining `players` purely on `player_id` produces
+       one joined row per (vote, player-match-row) pair. If a player has
+       N rows in `players` (one per match), every vote is duplicated N times,
+       inflating COUNT(v.id) by Nx. We constrain the join to the same match
+       (`pl.match_id = po.match_id`) so each vote joins to at most one
+       `pl` row. Pre-existing latent bug — fixed alongside the GROUP BY
+       error since they share the same join.
+    """
     conn = get_connection()
     try:
         rows = conn.execute('''
             SELECT v.player_id,
-                   pl.name as player_name,
-                   pl.photo_url,
+                   MAX(pl.name) as player_name,
+                   MAX(pl.photo_url) as photo_url,
                    ROUND(AVG(v.rating), 2) as avg_rating,
                    COUNT(DISTINCT v.poll_id) as matches_rated,
                    COUNT(v.id) as total_ratings
             FROM votes v
             JOIN polls po ON po.poll_id = v.poll_id AND po.status = 'closed'
-            LEFT JOIN players pl ON pl.player_id = v.player_id
+            LEFT JOIN players pl
+                   ON pl.player_id = v.player_id
+                  AND pl.match_id = po.match_id
             GROUP BY v.player_id
             ORDER BY avg_rating DESC
             LIMIT ?

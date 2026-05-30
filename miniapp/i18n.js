@@ -73,6 +73,7 @@ var TRANSLATIONS = {
             save: 'Сохранить',
             enter_id: 'Введите ID',
             id_saved: 'ID сохранён!',
+            id_copied: 'ID скопирован',
             badges: {
                 veteran: 'Ветеран',
                 active: 'Активный',
@@ -596,6 +597,7 @@ var TRANSLATIONS = {
             save: 'Save',
             enter_id: 'Enter ID',
             id_saved: 'ID saved!',
+            id_copied: 'ID copied',
             badges: {
                 veteran: 'Veteran',
                 active: 'Active',

@@ -172,6 +172,9 @@ function animateAllCounters(root) {
     }
 }
 
+/* ═══ Inline SVG icons (kept inline so we don't ship an extra file) ═══ */
+const ICON_COPY = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+
 /* ═══ Chelsea-themed Avatars ═══ */
 const AVATARS = [
     { emoji: '', bg: 'var(--blue)', label: 'Default' },
@@ -2287,11 +2290,20 @@ async function renderProfileTab() {
             ${avatarGridHtml}
         </div>
 
-        <div class="card text-center">
-            <h3>${state.firstName || ''} ${state.lastName || ''}</h3>
-            <p class="player-meta">@${state.username || '—'}</p>
-            <p class="player-meta">ID: ${customId}</p>
-            <div class="mt-8">${badges}</div>
+        <div class="profile-hero">
+            <div class="profile-hero-bg"></div>
+            <div class="profile-hero-content">
+                <h2 class="profile-hero-name">${escapeHtml((state.firstName || '') + ' ' + (state.lastName || '')).trim() || '—'}</h2>
+                ${state.username ? `<a class="profile-username-pill" href="https://t.me/${encodeURIComponent(state.username)}" target="_blank" rel="noopener">@${escapeHtml(state.username)}</a>` : ''}
+                <div class="profile-id-row">
+                    <span class="profile-id-label">ID</span>
+                    <button class="profile-id-badge${p.custom_id ? ' is-custom' : ''}" onclick="copyMyId()" title="${t('social.copy_link')}">
+                        <span class="profile-id-value">${escapeHtml(customId)}</span>
+                        <span class="profile-id-copy">${ICON_COPY}</span>
+                    </button>
+                </div>
+                ${badges ? `<div class="profile-hero-badges">${badges}</div>` : ''}
+            </div>
         </div>
         <div class="stats-grid">
             <div class="stat-card">
@@ -2474,6 +2486,43 @@ function copyReferral() {
         });
     } else {
         toast(t('common.error'));
+    }
+}
+
+function copyMyId() {
+    // Copy the bare ID (no referral text) — that's what the user sees on the
+    // badge, so what they paste should match what was on screen. Falls back
+    // to the numeric Telegram user_id if neither custom nor auto IDs exist.
+    var p = state.myProfile || {};
+    var code = p.custom_id || p.auto_id || String(state.userId || '');
+    if (!code) return;
+    var done = function () {
+        toast(t('profile.id_copied') || t('social.copied'));
+        // Tiny haptic + visual pulse on the badge
+        try { if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred('light'); } catch (_) {}
+        var btn = document.querySelector('.profile-id-badge');
+        if (btn) {
+            btn.classList.add('copied');
+            setTimeout(function () { btn.classList.remove('copied'); }, 600);
+        }
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(code).then(done).catch(function () { toast(t('common.error')); });
+    } else {
+        // Legacy fallback for older WebViews without async clipboard.
+        try {
+            var ta = document.createElement('textarea');
+            ta.value = code;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+            done();
+        } catch (_) {
+            toast(t('common.error'));
+        }
     }
 }
 
