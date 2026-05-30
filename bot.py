@@ -27,6 +27,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     text = (
         "<b>Available commands:</b>\n\n"
         "/start - Open the voting mini app\n"
@@ -36,6 +37,96 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/predict &lt;player_name&gt; - Quick prediction\n"
         "/help - This help message"
     )
+    if _is_owner(user_id):
+        text += (
+            "\n\n<b>👑 Owner-only commands:</b>\n"
+            "/admin_add &lt;user_id&gt; [username] - Grant admin\n"
+            "/admin_remove &lt;user_id&gt; - Revoke admin\n"
+            "/admins - List current admins"
+        )
+    await update.message.reply_html(text)
+
+
+# ── Owner / admin management ─────────────────────────────────────────────
+
+def _is_owner(uid: int) -> bool:
+    """A user is the owner if their id matches OWNER_ID env or the DB-stored owner_id."""
+    if OWNER_ID and uid == OWNER_ID:
+        return True
+    try:
+        return uid == get_owner_id()
+    except Exception:
+        return False
+
+
+async def admin_add_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not _is_owner(user_id):
+        await update.message.reply_html("❌ Только владелец бота может выдавать админку.")
+        return
+    if not context.args:
+        await update.message.reply_html(
+            "Usage: <code>/admin_add &lt;user_id&gt; [username]</code>\n"
+            "Example: <code>/admin_add 123456789 johndoe</code>"
+        )
+        return
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_html("❌ user_id должен быть числом.")
+        return
+    if target_id <= 0:
+        await update.message.reply_html("❌ user_id должен быть положительным числом.")
+        return
+    username = context.args[1] if len(context.args) > 1 else ''
+    add_admin(target_id, username, user_id)
+    add_log(user_id, "add_admin_via_bot", target_user_id=target_id,
+            details={"username": username})
+    uname_disp = f"@{username}" if username else "(без username)"
+    await update.message.reply_html(
+        f"✅ Админ добавлен: <code>{target_id}</code> {uname_disp}"
+    )
+
+
+async def admin_remove_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not _is_owner(user_id):
+        await update.message.reply_html("❌ Только владелец бота может убирать админку.")
+        return
+    if not context.args:
+        await update.message.reply_html(
+            "Usage: <code>/admin_remove &lt;user_id&gt;</code>"
+        )
+        return
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_html("❌ user_id должен быть числом.")
+        return
+    if target_id == get_owner_id():
+        await update.message.reply_html("❌ Нельзя убрать админку у владельца. Поменяй OWNER_ID env.")
+        return
+    remove_admin(target_id)
+    add_log(user_id, "remove_admin_via_bot", target_user_id=target_id)
+    await update.message.reply_html(f"✅ Админ удалён: <code>{target_id}</code>")
+
+
+async def admins_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not _is_owner(user_id):
+        await update.message.reply_html("❌ Только владелец бота может смотреть список админов.")
+        return
+    admins = list_admins()
+    owner_id = get_owner_id()
+    text = "<b>👥 Админы:</b>\n\n"
+    text += f"👑 Owner: <code>{owner_id if owner_id else '(не задан)'}</code>\n"
+    if admins:
+        text += "\n<b>Дополнительные админы:</b>"
+        for a in admins:
+            uname = f"@{a['username']}" if a.get('username') else '(без username)'
+            text += f"\n🛡 <code>{a['user_id']}</code> — {uname}"
+    else:
+        text += "\n<i>(других админов нет)</i>"
     await update.message.reply_html(text)
 
 
@@ -174,6 +265,10 @@ def main():
     app.add_handler(CommandHandler("top", top_cmd))
     app.add_handler(CommandHandler("streak", streak_cmd))
     app.add_handler(CommandHandler("predict", predict_cmd))
+    # Owner-only admin management commands
+    app.add_handler(CommandHandler("admin_add", admin_add_cmd))
+    app.add_handler(CommandHandler("admin_remove", admin_remove_cmd))
+    app.add_handler(CommandHandler("admins", admins_cmd))
     print("Bot started...")
     app.run_polling()
 
