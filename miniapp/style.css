@@ -1500,6 +1500,12 @@ body.app-booting #main          { animation: boot-fade-in 0.55s 0.35s cubic-bezi
        further down the cascade. */
     color: #fff;
 }
+[data-theme="light"] .profile-id-row,
+[data-theme="vintage"] .profile-id-row {
+    /* Slightly darker pill backdrop on light themes so the white
+       border + ID text don't blow out against the bright gradient. */
+    background: rgba(0,0,0,0.18);
+}
 .profile-username-pill {
     display: inline-flex;
     align-items: center;
