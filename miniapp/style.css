@@ -1242,3 +1242,336 @@ body.app-booting #main          { animation: boot-fade-in 0.55s 0.35s cubic-bezi
     display: inline-block;
     margin: 0 auto 8px;
 }
+
+
+
+/* ─────────────────────────────────────────────────────────────────
+   New themes
+   Each theme overrides the same CSS variables defined in :root, so
+   nothing else in the stylesheet has to know they exist.
+   ───────────────────────────────────────────────────────────────── */
+
+/* Stamford Bridge — saturated chelsea blue + heavy gold accents.
+   Slightly darker base than the default `dark`, more vivid blue cards. */
+[data-theme="stamford-bridge"] {
+    --bg: #061429;
+    --bg-card: #0c2454;
+    --bg-card-hover: #143273;
+    --text: #ffffff;
+    --text-dim: #9ab3d6;
+    --blue: #0563c1;
+    --blue-light: #2b88e8;
+    --blue-dark: #022d5c;
+    --gold: #f0c040;
+    --gold-light: #ffd866;
+    --shadow: 0 4px 24px rgba(5,99,193,0.35);
+}
+
+/* Vintage Chelsea — warm cream + retro gold + dark navy.
+   Matchday-program feel; high contrast for readability. */
+[data-theme="vintage"] {
+    --bg: #f4ead2;
+    --bg-card: #fff8e6;
+    --bg-card-hover: #efe2bf;
+    --text: #1a2438;
+    --text-dim: #6b6048;
+    --blue: #1d3464;
+    --blue-light: #2c4a8a;
+    --blue-dark: #0f1f3d;
+    --gold: #b88813;
+    --gold-light: #d6a837;
+    --shadow: 0 4px 18px rgba(184,136,19,0.18);
+}
+
+/* Stadium Lights — near-black + neon blue + electric yellow.
+   "Floodlights at Stamford Bridge" vibe, high contrast. */
+[data-theme="stadium"] {
+    --bg: #050810;
+    --bg-card: #0c1424;
+    --bg-card-hover: #14223d;
+    --text: #f5f8ff;
+    --text-dim: #7a8aa6;
+    --blue: #00a3ff;
+    --blue-light: #3ec4ff;
+    --blue-dark: #003e6e;
+    --gold: #fff200;
+    --gold-light: #fff766;
+    --shadow: 0 0 32px rgba(0,163,255,0.25);
+}
+
+/* Auto — follow the OS color scheme. We don't change variables here
+   directly; instead we switch between the dark defaults and the light
+   override based on prefers-color-scheme. The :root block already sets
+   the dark variables, so we only need to invert when the user is on
+   light mode AND has chosen Auto. */
+@media (prefers-color-scheme: light) {
+    [data-theme="auto"] {
+        --bg: #f0f4f8;
+        --bg-card: #ffffff;
+        --bg-card-hover: #e8edf2;
+        --text: #1a1a2e;
+        --text-dim: #667788;
+    }
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   Theme picker cards (in Settings → Theme).
+   Replaces the old grid-3 of two btn-secondary buttons. Each card is
+   a colored swatch + label, with a gold selected ring.
+   ───────────────────────────────────────────────────────────────── */
+.theme-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+}
+@media (max-width: 380px) {
+    .theme-grid { grid-template-columns: 1fr 1fr; }
+}
+.theme-card {
+    background: var(--bg);
+    border: 2px solid transparent;
+    border-radius: 10px;
+    padding: 10px 8px 8px;
+    cursor: pointer;
+    transition: transform 0.12s, border-color 0.12s, box-shadow 0.12s;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 0.78rem;
+}
+.theme-card:hover { transform: translateY(-2px); border-color: rgba(219,161,17,0.4); }
+.theme-card:active { transform: scale(0.97); }
+.theme-card.selected {
+    border-color: var(--gold);
+    box-shadow: 0 0 0 1px var(--gold), 0 4px 14px rgba(219,161,17,0.3);
+}
+.theme-card-swatch {
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    border-radius: 6px;
+    border: 1px solid rgba(255,255,255,0.08);
+}
+.theme-card-label {
+    font-weight: 600;
+    text-align: center;
+    line-height: 1.1;
+}
+
+/* Per-theme swatch previews — give the user a visual cue what each
+   theme looks like before they commit. */
+.theme-swatch-dark      { background: linear-gradient(135deg, #0a1628 0%, #0f1f38 60%, #DBA111 100%); }
+.theme-swatch-light     { background: linear-gradient(135deg, #f0f4f8 0%, #ffffff 60%, #DBA111 100%); }
+.theme-swatch-stamford  { background: linear-gradient(135deg, #061429 0%, #0c2454 60%, #f0c040 100%); }
+.theme-swatch-vintage   { background: linear-gradient(135deg, #f4ead2 0%, #fff8e6 60%, #b88813 100%); }
+.theme-swatch-stadium   { background: linear-gradient(135deg, #050810 0%, #00a3ff 50%, #fff200 100%); }
+.theme-swatch-auto      { background: linear-gradient(135deg, #0a1628 0%, #f0f4f8 50%, #DBA111 100%); }
+
+/* ─────────────────────────────────────────────────────────────────
+   iOS-style toggle switch
+   Replaces the default OS checkbox in settings. Visual contract:
+   - Off: muted grey track, thumb on the left
+   - On:  blue→gold gradient track, thumb slid to the right with a
+          subtle gold halo
+   The underlying <input type="checkbox"> stays present (just visually
+   hidden) so existing JS reading `.checked` keeps working unchanged.
+   ───────────────────────────────────────────────────────────────── */
+.switch {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+}
+.switch input[type="checkbox"] {
+    /* Visually hide but keep accessible to assistive tech and JS */
+    position: absolute;
+    opacity: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    cursor: pointer;
+    z-index: 1;
+}
+.switch-track {
+    display: inline-block;
+    width: 46px;
+    height: 26px;
+    background: rgba(255,255,255,0.15);
+    border-radius: 999px;
+    position: relative;
+    transition: background 0.2s ease;
+    flex-shrink: 0;
+}
+[data-theme="light"] .switch-track,
+[data-theme="vintage"] .switch-track {
+    background: rgba(0,0,0,0.18);
+}
+.switch-thumb {
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 20px;
+    height: 20px;
+    background: #fff;
+    border-radius: 50%;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.switch input[type="checkbox"]:checked ~ .switch-track {
+    background: linear-gradient(135deg, var(--blue) 0%, var(--gold) 100%);
+}
+.switch input[type="checkbox"]:checked ~ .switch-track .switch-thumb {
+    transform: translateX(20px);
+    box-shadow: 0 0 0 2px rgba(219,161,17,0.25), 0 1px 4px rgba(0,0,0,0.3);
+}
+.switch input[type="checkbox"]:focus-visible ~ .switch-track {
+    outline: 2px solid var(--gold);
+    outline-offset: 2px;
+}
+.switch input[type="checkbox"]:disabled ~ .switch-track {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   Profile Hero (avatar + name + ID badge).
+   Replaces the old plain-text identity card AND the chelsea-themed
+   avatar grid. Single source of truth for "who am I" visual.
+   ───────────────────────────────────────────────────────────────── */
+.profile-hero {
+    position: relative;
+    overflow: hidden;
+    border-radius: var(--radius);
+    margin-bottom: 12px;
+    box-shadow: var(--shadow);
+    isolation: isolate;
+}
+.profile-hero-bg {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    background:
+        radial-gradient(120% 80% at 0% 0%, rgba(219,161,17,0.18) 0%, rgba(219,161,17,0) 55%),
+        radial-gradient(120% 80% at 100% 100%, rgba(5,99,193,0.32) 0%, rgba(5,99,193,0) 60%),
+        linear-gradient(135deg, var(--blue-dark) 0%, var(--bg-card) 60%);
+}
+.profile-hero-bg::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(115deg, rgba(255,255,255,0) 35%, rgba(255,255,255,0.06) 50%, rgba(255,255,255,0) 65%);
+    pointer-events: none;
+}
+.profile-hero-content {
+    position: relative;
+    z-index: 1;
+    padding: 22px 18px 18px;
+    text-align: center;
+}
+.profile-hero-avatar {
+    width: 96px;
+    height: 96px;
+    margin: 0 auto 12px;
+    border-radius: 50%;
+    overflow: hidden;
+    border: 3px solid rgba(219,161,17,0.6);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4), 0 0 0 4px rgba(5,99,193,0.18);
+}
+.profile-hero-avatar img,
+.profile-hero-avatar > div {
+    width: 100% !important;
+    height: 100% !important;
+    border-radius: 50% !important;
+}
+.profile-hero-name {
+    font-size: 1.55rem;
+    font-weight: 800;
+    line-height: 1.15;
+    color: #fff;
+    letter-spacing: -0.01em;
+    margin: 0 0 8px;
+}
+[data-theme="light"] .profile-hero-name,
+[data-theme="vintage"] .profile-hero-name {
+    /* On light backgrounds the gradient is still dark-blue dominant,
+       so white still works — explicitly forced to avoid theme overrides
+       further down the cascade. */
+    color: #fff;
+}
+.profile-username-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.82rem;
+    font-weight: 500;
+    color: var(--gold-light);
+    background: rgba(219,161,17,0.12);
+    border: 1px solid rgba(219,161,17,0.35);
+    border-radius: 999px;
+    padding: 3px 10px;
+    text-decoration: none;
+    transition: background 0.15s, transform 0.15s;
+}
+.profile-username-pill:hover { background: rgba(219,161,17,0.22); transform: translateY(-1px); }
+
+.profile-id-row {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 14px;
+    padding: 4px 4px 4px 12px;
+    background: rgba(0,0,0,0.28);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 999px;
+}
+.profile-id-label {
+    font-size: 0.66rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+}
+.profile-id-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.12);
+    color: #fff;
+    border-radius: 999px;
+    padding: 5px 10px 5px 12px;
+    font: 600 0.85rem/1 ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, transform 0.1s;
+}
+.profile-id-badge:hover {
+    background: rgba(255,255,255,0.1);
+    border-color: rgba(255,255,255,0.2);
+}
+.profile-id-badge:active { transform: scale(0.97); }
+.profile-id-badge.is-custom {
+    background: linear-gradient(135deg, rgba(219,161,17,0.25), rgba(219,161,17,0.1));
+    border-color: rgba(219,161,17,0.55);
+    color: var(--gold-light);
+}
+.profile-id-badge.copied {
+    background: rgba(40,167,69,0.25);
+    border-color: rgba(40,167,69,0.6);
+    color: #b8f0c4;
+}
+.profile-id-copy {
+    display: inline-flex;
+    align-items: center;
+    opacity: 0.7;
+}
+.profile-id-badge:hover .profile-id-copy { opacity: 1; }
+
+.profile-hero-badges {
+    margin-top: 14px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    justify-content: center;
+}
