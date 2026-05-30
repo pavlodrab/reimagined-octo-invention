@@ -35,6 +35,65 @@ if _DRIVER == 'postgres':
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Postgres connection pool (only on postgres driver, optional, with fallback)
+# ──────────────────────────────────────────────────────────────────────
+# Without a pool every request opens a fresh TCP connection (3-way handshake +
+# auth + SSL + role lookup) — typically 30-100ms of latency per request on a
+# remote Postgres. With a pool that drops to <1ms.
+#
+# We open the pool lazily (open=False + open(wait=False)) so that a brief
+# Postgres outage at startup doesn't kill the whole app — the pool will
+# reconnect on first getconn(). If psycopg_pool is unavailable for any
+# reason, get_connection() falls back to per-request connect.
+
+_pool = None  # ConnectionPool instance, or None on SQLite / fallback
+
+if _DRIVER == 'postgres':
+    try:
+        from psycopg_pool import ConnectionPool
+        _pool_min = int(os.getenv('PG_POOL_MIN_SIZE', '1') or '1')
+        _pool_max = int(os.getenv('PG_POOL_MAX_SIZE', '10') or '10')
+        _pool_timeout = float(os.getenv('PG_POOL_TIMEOUT', '5') or '5')
+        _pool = ConnectionPool(
+            conninfo=_DATABASE_URL,
+            min_size=_pool_min,
+            max_size=_pool_max,
+            timeout=_pool_timeout,
+            kwargs={'row_factory': dict_row},
+            open=False,
+            name='chelsea_voting_pool',
+        )
+        # Async open: schedules background connection establishment but
+        # doesn't block app startup. First getconn() will wait if needed.
+        _pool.open(wait=False)
+        _log.info(
+            "Postgres ConnectionPool created (min=%d, max=%d, timeout=%.1fs, lazy open)",
+            _pool_min, _pool_max, _pool_timeout,
+        )
+    except ImportError:
+        _log.warning("psycopg_pool not installed — using direct connect per request "
+                     "(slower latency on remote Postgres)")
+        _pool = None
+    except Exception:
+        _log.exception("Postgres ConnectionPool init failed; falling back to direct connect")
+        _pool = None
+
+
+def close_pool():
+    """Close the connection pool. Idempotent. Safe to call from atexit."""
+    global _pool
+    if _pool is None:
+        return
+    try:
+        _pool.close()
+        _log.info("Postgres ConnectionPool closed")
+    except Exception:
+        _log.exception("error closing Postgres ConnectionPool")
+    finally:
+        _pool = None
+
+
+# ──────────────────────────────────────────────────────────────────────
 # SQL translation: SQLite dialect → Postgres dialect.
 # Translation is intentionally narrow — only what this codebase actually uses.
 # ──────────────────────────────────────────────────────────────────────
@@ -92,10 +151,14 @@ class _Cursor:
 
 class _Conn:
     """Wraps a DB connection; exposes a sqlite3.Connection-compatible API."""
-    __slots__ = ('_conn',)
+    __slots__ = ('_conn', '_pool')
 
-    def __init__(self, conn):
+    def __init__(self, conn, _pool=None):
         self._conn = conn
+        # When set, .close() returns the connection to this pool instead of
+        # actually closing it. Allows callers to keep using the existing
+        # `conn = get_connection(); try: ...; finally: conn.close()` pattern.
+        self._pool = _pool
 
     def execute(self, sql, params=()):
         cur = self._conn.cursor()
@@ -109,7 +172,17 @@ class _Conn:
         self._conn.commit()
 
     def close(self):
-        self._conn.close()
+        if self._pool is not None:
+            try:
+                self._pool.putconn(self._conn)
+                return
+            except Exception:
+                _log.exception("pool.putconn() failed; closing connection directly")
+        # Fallback / non-pool path
+        try:
+            self._conn.close()
+        except Exception:
+            _log.exception("connection close failed")
 
 
 def get_connection():
@@ -119,9 +192,16 @@ def get_connection():
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
         return _Conn(conn)
-    else:
-        conn = psycopg.connect(_DATABASE_URL, row_factory=dict_row)
-        return _Conn(conn)
+    # Postgres: prefer pooled connection
+    if _pool is not None:
+        try:
+            conn = _pool.getconn()
+            return _Conn(conn, _pool=_pool)
+        except Exception:
+            _log.exception("pool.getconn() failed; falling back to direct connect")
+    # Direct connect fallback (psycopg_pool unavailable or pool exhausted/error)
+    conn = psycopg.connect(_DATABASE_URL, row_factory=dict_row)
+    return _Conn(conn)
 
 
 # ──────────────────────────────────────────────────────────────────────

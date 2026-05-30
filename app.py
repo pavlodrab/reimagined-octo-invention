@@ -3470,6 +3470,12 @@ except Exception:
     logger.exception("Background scheduler failed to start")
 
 atexit.register(lambda: scheduler.shutdown(wait=False) if scheduler.running else None)
+# Close the Postgres pool cleanly so connections aren't dangled at shutdown.
+try:
+    from db import close_pool as _close_db_pool
+    atexit.register(_close_db_pool)
+except Exception:
+    logger.exception("could not register db pool atexit handler")
 
 
 if __name__ == "__main__":
