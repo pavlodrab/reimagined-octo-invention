@@ -2151,7 +2151,6 @@ async function renderProfileTab() {
     const customId = p.custom_id || p.auto_id || '—';
     const votesCount = p.total_votes || 0;
     const canCustomize = votesCount >= 10;
-    const currentAvatar = parseInt(p.avatar) || 0;
 
     // Build badges
     let badges = '';
@@ -2250,22 +2249,12 @@ async function renderProfileTab() {
             '<div class="player-meta">' + t('awards.no_awards') + '</div></div>';
     }
 
-    // Build avatar grid with lock checks
-    let avatarGridHtml = '<div class="avatar-grid">';
-    for (let i = 0; i < AVATARS.length; i++) {
-        let avContent = '';
-        if (i === 0) {
-            avContent = ((state.firstName || '?')[0] + ((state.lastName || '')[0] || '')).toUpperCase();
-        } else {
-            avContent = AVATARS[i].emoji;
-        }
-        let selectedClass = (i === currentAvatar) ? ' selected' : '';
-        var unlocked = isAvatarUnlocked(i, xpData);
-        var lockedClass = unlocked ? '' : ' avatar-locked';
-        var onclickAttr = unlocked ? 'onclick="selectAvatar(' + i + ')"' : '';
-        avatarGridHtml += '<div class="avatar-option' + selectedClass + lockedClass + '" style="background:' + AVATARS[i].bg + ';' + (i === 0 ? 'color:#fff;font-size:1rem;font-weight:700;' : '') + '" ' + onclickAttr + '>' + avContent + '</div>';
-    }
-    avatarGridHtml += '</div>';
+    // Avatar source: ONLY Telegram profile photo. The chelsea-themed emoji
+    // grid was removed — TG photo is the single source of truth, with a
+    // graceful initials fallback for users who didn't grant Telegram photo
+    // access (or who connected via demo mode without a real account).
+    const heroPhotoUrl = p.telegram_photo_url || state.telegramPhotoUrl || '';
+    const heroAvatarHtml = getAvatarHtml(0, 96, heroPhotoUrl);
 
     content.innerHTML = `
         <!-- XP Progress -->
@@ -2277,18 +2266,11 @@ async function renderProfileTab() {
         <!-- Awards Display -->
         ${awardsHtml}
 
-        <!-- Avatar selector -->
-        <div class="card text-center">
-            <h3 style="margin-bottom:12px;">${t('customization.choose_avatar')}</h3>
-            <div class="avatar-large-wrap">
-                ${getAvatarHtml(currentAvatar, 96, p.telegram_photo_url || state.telegramPhotoUrl)}
-            </div>
-            ${avatarGridHtml}
-        </div>
-
+        <!-- Profile hero (avatar + name + ID badge) -->
         <div class="profile-hero">
             <div class="profile-hero-bg"></div>
             <div class="profile-hero-content">
+                <div class="profile-hero-avatar">${heroAvatarHtml}</div>
                 <h2 class="profile-hero-name">${escapeHtml((state.firstName || '') + ' ' + (state.lastName || '')).trim() || '—'}</h2>
                 ${state.username ? `<a class="profile-username-pill" href="https://t.me/${encodeURIComponent(state.username)}" target="_blank" rel="noopener">@${escapeHtml(state.username)}</a>` : ''}
                 <div class="profile-id-row">
@@ -2301,6 +2283,7 @@ async function renderProfileTab() {
                 ${badges ? `<div class="profile-hero-badges">${badges}</div>` : ''}
             </div>
         </div>
+
         <div class="stats-grid">
             <div class="stat-card">
                 <strong data-counter="${votesCount}">0</strong>
@@ -2386,47 +2369,12 @@ async function loadHeatmap() {
     } catch (e) { /* ignore */ }
 }
 
-function isAvatarUnlocked(index, xpData) {
-    if (index <= 4) return true;
-    if (!xpData) return false;
-    var totalXp = (xpData.xp && xpData.xp.total_xp) || 0;
-    if (index <= 6) return totalXp >= 100;
-    if (index <= 8) return totalXp >= 500;
-    return totalXp >= 1500;
-}
-
-async function selectAvatar(index) {
-    // Check unlock
-    var xpNeeded = 0;
-    if (index >= 5 && index <= 6) xpNeeded = 100;
-    else if (index >= 7 && index <= 8) xpNeeded = 500;
-    else if (index >= 9) xpNeeded = 1500;
-
-    if (xpNeeded > 0) {
-        try {
-            var xpRes = await api('/api/xp/me');
-            var currentXp = (xpRes.success && xpRes.xp && xpRes.xp.total_xp) || 0;
-            if (currentXp < xpNeeded) {
-                toast(t('xp.locked') + ' - ' + t('xp.unlock_at') + ' ' + xpNeeded + ' XP');
-                return;
-            }
-        } catch (e) {
-            toast(t('xp.locked'));
-            return;
-        }
-    }
-
-    state.myProfile = state.myProfile || {};
-    state.myProfile.avatar = String(index);
-    try {
-        await api('/api/profile/update', {
-            method: 'POST',
-            body: JSON.stringify({ avatar: String(index) }),
-        });
-        toast(t('toast.saved'));
-    } catch (e) { toast(t('toast.error_saving')); }
-    renderProfileTab();
-}
+// `selectAvatar()` and `isAvatarUnlocked()` were removed alongside the
+// chelsea-themed emoji avatar grid. Telegram profile photo (or initials
+// fallback) is now the single source of truth for the user avatar.
+// `getAvatarHtml()` is preserved because it's still used to render
+// avatars inside leaderboards and admin user lists, with the same
+// photo-url-first contract.
 
 async function saveCustomId() {
     const input = document.getElementById('custom-id-input');
@@ -2486,15 +2434,14 @@ function copyReferral() {
 }
 
 function copyMyId() {
-    // Copy the bare ID (no referral text) — that's what the user sees on the
-    // badge, so what they paste should match what was on screen. Falls back
-    // to the numeric Telegram user_id if neither custom nor auto IDs exist.
+    // Copy the bare ID (no referral text) — the badge shows just the ID,
+    // so what users paste should match what they tapped on. Falls back to
+    // the numeric Telegram user_id if neither custom nor auto IDs exist.
     var p = state.myProfile || {};
     var code = p.custom_id || p.auto_id || String(state.userId || '');
     if (!code) return;
     var done = function () {
         toast(t('profile.id_copied') || t('social.copied'));
-        // Tiny haptic + visual pulse on the badge
         try { if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred('light'); } catch (_) {}
         var btn = document.querySelector('.profile-id-badge');
         if (btn) {
@@ -2505,7 +2452,6 @@ function copyMyId() {
     if (navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(code).then(done).catch(function () { toast(t('common.error')); });
     } else {
-        // Legacy fallback for older WebViews without async clipboard.
         try {
             var ta = document.createElement('textarea');
             ta.value = code;
@@ -2549,9 +2495,31 @@ function renderSettingsTab() {
         <!-- Theme -->
         <div class="admin-section">
             <h3>\uD83C\uDFA8 ${t('settings.theme')}</h3>
-            <div class="grid-3">
-                <button class="btn-secondary" onclick="setTheme('dark')" id="theme-dark-btn">\uD83C\uDF19 ${t('settings.theme_dark')}</button>
-                <button class="btn-secondary" onclick="setTheme('light')" id="theme-light-btn">\u2600\uFE0F ${t('settings.theme_light')}</button>
+            <div class="theme-grid">
+                <button class="theme-card" data-theme-pick="dark" onclick="setTheme('dark')">
+                    <span class="theme-card-swatch theme-swatch-dark"></span>
+                    <span class="theme-card-label">\uD83C\uDF19 ${t('settings.theme_dark')}</span>
+                </button>
+                <button class="theme-card" data-theme-pick="light" onclick="setTheme('light')">
+                    <span class="theme-card-swatch theme-swatch-light"></span>
+                    <span class="theme-card-label">\u2600\uFE0F ${t('settings.theme_light')}</span>
+                </button>
+                <button class="theme-card" data-theme-pick="stamford-bridge" onclick="setTheme('stamford-bridge')">
+                    <span class="theme-card-swatch theme-swatch-stamford"></span>
+                    <span class="theme-card-label">\uD83E\uDD81 ${t('settings.theme_stamford')}</span>
+                </button>
+                <button class="theme-card" data-theme-pick="vintage" onclick="setTheme('vintage')">
+                    <span class="theme-card-swatch theme-swatch-vintage"></span>
+                    <span class="theme-card-label">\uD83C\uDFFA ${t('settings.theme_vintage')}</span>
+                </button>
+                <button class="theme-card" data-theme-pick="stadium" onclick="setTheme('stadium')">
+                    <span class="theme-card-swatch theme-swatch-stadium"></span>
+                    <span class="theme-card-label">\uD83C\uDFDF\uFE0F ${t('settings.theme_stadium')}</span>
+                </button>
+                <button class="theme-card" data-theme-pick="auto" onclick="setTheme('auto')">
+                    <span class="theme-card-swatch theme-swatch-auto"></span>
+                    <span class="theme-card-label">\uD83D\uDCF1 ${t('settings.theme_auto')}</span>
+                </button>
             </div>
         </div>
 
@@ -2560,9 +2528,10 @@ function renderSettingsTab() {
             <h3>\uD83D\uDD0A ${t('customization.sound_effects')}</h3>
             <div class="toggle-row">
                 <span class="toggle-label">${t('customization.sound_effects')}</span>
-                <label>
+                <label class="switch">
                     <input type="checkbox" id="setting-sound" ${soundsEnabled ? 'checked' : ''}
                         onchange="toggleSound(this.checked)">
+                    <span class="switch-track"><span class="switch-thumb"></span></span>
                 </label>
             </div>
         </div>
@@ -2572,15 +2541,24 @@ function renderSettingsTab() {
             <h3>\uD83D\uDD14 ${t('notifications.prefs_title')}</h3>
             <div class="toggle-row">
                 <span class="toggle-label">${t('notifications.remind_before_close')}</span>
-                <input type="checkbox" id="notif-remind" onchange="saveNotifPrefs()">
+                <label class="switch">
+                    <input type="checkbox" id="notif-remind" onchange="saveNotifPrefs()">
+                    <span class="switch-track"><span class="switch-thumb"></span></span>
+                </label>
             </div>
             <div class="toggle-row">
                 <span class="toggle-label">${t('notifications.new_poll')}</span>
-                <input type="checkbox" id="notif-new-poll" onchange="saveNotifPrefs()">
+                <label class="switch">
+                    <input type="checkbox" id="notif-new-poll" onchange="saveNotifPrefs()">
+                    <span class="switch-track"><span class="switch-thumb"></span></span>
+                </label>
             </div>
             <div class="toggle-row">
                 <span class="toggle-label">${t('notifications.results_ready')}</span>
-                <input type="checkbox" id="notif-results" onchange="saveNotifPrefs()">
+                <label class="switch">
+                    <input type="checkbox" id="notif-results" onchange="saveNotifPrefs()">
+                    <span class="switch-track"><span class="switch-thumb"></span></span>
+                </label>
             </div>
         </div>
 
@@ -2608,6 +2586,13 @@ function renderSettingsTab() {
 
     // Load notification preferences
     loadNotifPrefs();
+
+    // Highlight currently-selected theme card (read from <html data-theme>
+    // which boot.js seeded from localStorage on initial load).
+    var currentTheme = document.documentElement.getAttribute('data-theme') || 'dark';
+    document.querySelectorAll('.theme-card').forEach(function (b) {
+        b.classList.toggle('selected', b.getAttribute('data-theme-pick') === currentTheme);
+    });
 }
 
 function toggleSound(enabled) {
@@ -2665,8 +2650,18 @@ function onLangChange(lang) {
 }
 
 function setTheme(theme) {
+    // Auto mode follows the OS via prefers-color-scheme; we still tag
+    // the root element so other code (setTheme highlight, theme-card
+    // selection) can reflect the user's pick.
     document.documentElement.setAttribute('data-theme', theme);
-    localStorage.setItem('chelsea_theme', theme);
+    try { localStorage.setItem('chelsea_theme', theme); } catch (e) {}
+    // Reflect selection on the theme-card buttons (visible-only when
+    // the settings tab is rendered; querySelectorAll silently no-ops
+    // otherwise).
+    document.querySelectorAll('.theme-card').forEach(function (b) {
+        b.classList.toggle('selected', b.getAttribute('data-theme-pick') === theme);
+    });
+    try { if (tg && tg.HapticFeedback) tg.HapticFeedback.selectionChanged(); } catch (_) {}
 }
 
 async function saveBackground() {
