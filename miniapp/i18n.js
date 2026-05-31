@@ -466,14 +466,24 @@ var TRANSLATIONS = {
             variant_c_desc: 'Топ-3 + статы под Stories',
             generating: 'Рисуем картинку…',
             no_data: 'Нет данных для карточки',
+            no_user_votes: 'Сначала проголосуй — карточка строится по твоим оценкам',
             cancel: 'Отмена',
             // Card body strings (rendered inside canvas)
-            card_mvp: 'MVP',
+            card_mvp: 'PLAYER OF THE MATCH',
             card_match_ratings: 'ОЦЕНКИ МАТЧА',
             card_top3: 'ТОП-3',
             card_voters: 'голосов',
             card_avg_rating: 'средний балл',
-            card_brand: 'Chelsea Voting Bot'
+            card_brand: '@ChelseaVotingBot',
+            card_vs: 'vs',
+            card_my_ratings: 'Мои оценки',
+            card_bench: 'ЗАПАС',
+            card_others: 'Остальные',
+            card_guessed_mvp: 'Угадал MVP',
+            card_streak: 'Серия',
+            card_streak_unit: 'матчей подряд',
+            card_xp_for_match: 'XP за матч',
+            card_round: 'тур'
         },
         live: {
             voters_now: 'уже проголосовали',
@@ -1012,14 +1022,24 @@ var TRANSLATIONS = {
             variant_c_desc: 'Top-3 + stats for Stories',
             generating: 'Drawing image…',
             no_data: 'No data for the card',
+            no_user_votes: 'Vote first — the card uses your own ratings',
             cancel: 'Cancel',
             // Card body strings (rendered inside canvas)
-            card_mvp: 'MVP',
+            card_mvp: 'PLAYER OF THE MATCH',
             card_match_ratings: 'MATCH RATINGS',
             card_top3: 'TOP 3',
             card_voters: 'votes',
             card_avg_rating: 'avg rating',
-            card_brand: 'Chelsea Voting Bot'
+            card_brand: '@ChelseaVotingBot',
+            card_vs: 'vs',
+            card_my_ratings: 'My ratings',
+            card_bench: 'BENCH',
+            card_others: 'Others',
+            card_guessed_mvp: 'Guessed MVP',
+            card_streak: 'Streak',
+            card_streak_unit: 'in a row',
+            card_xp_for_match: 'XP this match',
+            card_round: 'round'
         },
         live: {
             voters_now: 'voted already',
