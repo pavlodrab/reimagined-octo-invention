@@ -8,9 +8,14 @@ from flask import Flask, request, jsonify, send_from_directory, abort, g, has_re
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from logging_setup import init_logging, install_request_id_middleware
+import captcha as captcha_mod
 import logging
+from collections import deque
+from threading import Lock
+from functools import wraps
 
 # Initialise root logging BEFORE the rest of the app starts emitting messages.
 init_logging()
@@ -24,6 +29,22 @@ from db import *
 app = Flask(__name__, static_folder='miniapp', static_url_path='')
 CORS(app)
 install_request_id_middleware(app)
+
+# Cap incoming JSON payloads. The biggest legitimate request is a
+# vote_batch (~25 player rating pairs ≈ 1 KB). 64 KB leaves comfortable
+# headroom for future endpoints while killing anyone trying to DoS the
+# JSON parser with a multi-megabyte body.
+app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("MAX_CONTENT_LENGTH", str(64 * 1024)))
+
+# Trust X-Forwarded-For when running behind a single trusted proxy
+# (nginx, Cloudflare, Railway). Without this every client looks like
+# the proxy IP and the per-IP rate limiter degrades to one shared bucket.
+# Off by default — only flip when you're SURE there's exactly one proxy
+# in front of the app, otherwise spoofed XFF headers can fake any IP.
+if os.getenv("TRUST_PROXY", "0").lower() in ("1", "true", "yes", "on"):
+    _proxy_hops = int(os.getenv("TRUST_PROXY_HOPS", "1"))
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=_proxy_hops, x_proto=_proxy_hops, x_host=_proxy_hops)
+    logger.info("ProxyFix enabled (trust %d X-Forwarded-* hops)", _proxy_hops)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 MINI_APP_URL   = os.getenv("MINI_APP_URL", "")
@@ -98,6 +119,153 @@ limiter = Limiter(
     headers_enabled=True,  # adds X-RateLimit-* response headers
     strategy="fixed-window",
 )
+
+
+# ── Burst-window IP block ──────────────────────────────────────────────
+# flask-limiter's fixed-window counters are coarse (a 100/minute quota
+# allows a 100-request burst at second 0 + another 100 at second 60).
+# This middleware adds a rolling short-window cap on top, so a single
+# IP can't hammer N requests in M seconds even within their hourly
+# budget. Sized to be friction-free for real users (web app loads ~5
+# requests on cold start, each tab refresh ~3) but punishing for bots.
+#
+# Memory-only — single-process. For multi-worker Gunicorn each worker
+# keeps its own deque (effective threshold = N×workers). Acceptable
+# given this is a second line of defence; flask-limiter Redis storage
+# handles the cross-worker case.
+BURST_WINDOW_SECONDS = int(os.getenv("BURST_WINDOW_SECONDS", "10"))
+BURST_MAX_REQUESTS = int(os.getenv("BURST_MAX_REQUESTS", "30"))
+BURST_BLOCK_SECONDS = int(os.getenv("BURST_BLOCK_SECONDS", "60"))
+
+# IP -> deque of recent timestamps. Pruned lazily on each request.
+_burst_log: Dict[str, deque] = {}
+# IP -> unix timestamp until which the IP is hard-blocked.
+_burst_blocked: Dict[str, float] = {}
+_burst_lock = Lock()
+
+# Endpoints that must NEVER be burst-blocked: health checks, SSE
+# streams (long-lived connections), Telegram webhook (Telegram retries
+# aggressively on 429 and we don't want to feed the loop).
+_BURST_EXEMPT_PREFIXES = (
+    "/api/health",
+    "/api/stream/",
+    "/telegram/webhook",
+)
+
+
+@app.before_request
+def _burst_block_check():
+    """Reject IPs that exceed BURST_MAX_REQUESTS in BURST_WINDOW_SECONDS,
+    then keep rejecting them for BURST_BLOCK_SECONDS. Runs before every
+    request — must stay cheap. O(1) amortised: we prune at most one
+    expired entry per call thanks to the deque shape."""
+    if BURST_MAX_REQUESTS <= 0:
+        return  # disabled — handy in tests / staging probes
+    path = request.path or ""
+    for prefix in _BURST_EXEMPT_PREFIXES:
+        if path.startswith(prefix):
+            return
+
+    ip = get_remote_address() or "unknown"
+    now = time.time()
+
+    with _burst_lock:
+        # Already in the penalty box?
+        block_until = _burst_blocked.get(ip)
+        if block_until:
+            if now < block_until:
+                retry_after = max(1, int(block_until - now))
+                resp = jsonify({
+                    "success": False,
+                    "error": "rate_limited",
+                    "detail": "burst threshold exceeded; cooling off",
+                    "retry_after_seconds": retry_after,
+                })
+                resp.status_code = 429
+                resp.headers["Retry-After"] = str(retry_after)
+                return resp
+            # Block expired — clean up.
+            _burst_blocked.pop(ip, None)
+
+        # Slide the window.
+        log = _burst_log.setdefault(ip, deque(maxlen=BURST_MAX_REQUESTS + 4))
+        cutoff = now - BURST_WINDOW_SECONDS
+        while log and log[0] < cutoff:
+            log.popleft()
+        log.append(now)
+        if len(log) > BURST_MAX_REQUESTS:
+            _burst_blocked[ip] = now + BURST_BLOCK_SECONDS
+            log.clear()
+            logger.warning(
+                "burst-block triggered for %s on %s (threshold=%d/%ds)",
+                ip, path, BURST_MAX_REQUESTS, BURST_WINDOW_SECONDS,
+            )
+            resp = jsonify({
+                "success": False,
+                "error": "rate_limited",
+                "detail": "too many requests in a short window",
+                "retry_after_seconds": BURST_BLOCK_SECONDS,
+            })
+            resp.status_code = 429
+            resp.headers["Retry-After"] = str(BURST_BLOCK_SECONDS)
+            return resp
+
+
+@app.errorhandler(413)
+def _payload_too_large(_e):
+    """Specific JSON for the 64 KB MAX_CONTENT_LENGTH cap so clients
+    can show a friendly message instead of a generic browser 413."""
+    return jsonify({
+        "success": False,
+        "error": "payload_too_large",
+        "max_bytes": app.config.get("MAX_CONTENT_LENGTH"),
+    }), 413
+
+
+# ── CAPTCHA gate helpers ───────────────────────────────────────────────
+# A "first-vote" gate: users with zero votes lifetime must solve a
+# Chelsea-themed captcha before their first vote_batch is accepted.
+# After that they're considered trusted (a real fan opening the app)
+# and never see the captcha again. This is enough to raise the bot
+# attacker's per-vote cost without annoying real users.
+
+def _has_voted_ever(user_id: int) -> bool:
+    """True if the user has at least one vote in any poll. Cached for
+    one second per user via a tiny in-process LRU — vote_batch isn't
+    hit twice in the same second by the same user under normal use."""
+    if not user_id:
+        return False
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM votes WHERE user_id = ? LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        return row is not None
+    finally:
+        conn.close()
+
+
+def require_captcha_for_first_vote(view):
+    """Decorator: if the authenticated caller has never voted, demand a
+    valid X-Captcha-Proof header before letting the view run.
+
+    Returns 412 (not 403) so the client knows it's a fixable preflight,
+    not a permission problem. The body shape is `{captcha: true}` so
+    the client's api() helper can branch on it without parsing strings."""
+    @wraps(view)
+    def wrapper(*args, **kwargs):
+        uid = get_current_user_id()
+        if uid and not _has_voted_ever(uid):
+            proof = request.headers.get("X-Captcha-Proof", "").strip()
+            if not proof or not captcha_mod.verify_proof(proof, uid):
+                return jsonify({
+                    "success": False,
+                    "error": "captcha_required",
+                    "captcha": True,
+                }), 412
+        return view(*args, **kwargs)
+    return wrapper
 
 
 # ── Telegram webhook (optional — only when WEBHOOK_URL is set) ─────────
@@ -1394,6 +1562,7 @@ def api_current_poll():
 
 @app.post("/api/vote_batch")
 @limiter.limit("30 per minute")
+@require_captcha_for_first_vote
 def api_vote_batch():
     uid = get_current_user_id()
     if not uid:
@@ -1446,6 +1615,55 @@ def api_vote_batch():
     })
 
     return jsonify({"success": True})
+
+
+# ── CAPTCHA endpoints ──────────────────────────────────────────────────
+# Tight per-IP rate limit because anyone — including unauthenticated
+# clients — can hit them. The challenge endpoint mints opaque tokens,
+# the verify endpoint exchanges a solved token for a proof token.
+
+@app.get("/api/captcha/challenge")
+@limiter.limit("20 per minute")
+def api_captcha_challenge():
+    """Mint a fresh challenge. Public — no auth required, since brand-new
+    users need to pass it before they can authenticate-and-vote."""
+    return jsonify({"success": True, "challenge": captcha_mod.generate_challenge()})
+
+
+@app.post("/api/captcha/verify")
+@limiter.limit("20 per minute")
+def api_captcha_verify():
+    """Verify a captcha answer. On success, return a proof_token bound to
+    the current authenticated user id; without an authenticated session
+    the proof can't be useful (the gate decorator verifies uid binding)."""
+    uid = get_current_user_id()
+    if not uid:
+        return jsonify({"success": False, "error": "unauthorized"}), 401
+
+    body = request.get_json(force=True, silent=True) or {}
+    token = (body.get("challenge_token") or "").strip()
+    answer = body.get("answer")
+    if not token or answer is None:
+        return jsonify({"success": False, "error": "missing fields"}), 400
+
+    result = captcha_mod.verify_challenge_answer(token, answer)
+    if result == captcha_mod.CaptchaResult.OK:
+        proof = captcha_mod.issue_proof(uid)
+        return jsonify({
+            "success": True,
+            "proof_token": proof,
+            "expires_in": captcha_mod.PROOF_TTL_SECONDS,
+        })
+    # Map outcomes to specific error codes so the UI can react: expired
+    # tokens get "fetch a new challenge"; wrong answers get "try again
+    # right here". Bad signature / malformed are likely tampering — log
+    # and treat as a wrong answer to avoid leaking implementation detail.
+    if result == captcha_mod.CaptchaResult.EXPIRED:
+        return jsonify({"success": False, "error": "captcha_expired"}), 410
+    if result == captcha_mod.CaptchaResult.WRONG_ANSWER:
+        return jsonify({"success": False, "error": "captcha_wrong"}), 400
+    logger.info("captcha verify failed (%s) for uid=%s", result, uid)
+    return jsonify({"success": False, "error": "captcha_invalid"}), 400
 
 
 @app.get("/api/stream/poll/<poll_id>")

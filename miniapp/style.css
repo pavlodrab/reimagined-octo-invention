@@ -2006,3 +2006,128 @@ html[data-user-bg="1"] body::after {
     margin-top: 2px;
 }
 .bond-progress-meta.bond-maxed { color: var(--gold); font-weight: 700; }
+
+
+/* ── Chelsea CAPTCHA modal ─────────────────────────────────────────
+   Modal sits above everything; click-outside cancels. Mobile-first
+   layout: bottom-sheet on phones, centered card on tablets+. The
+   crest grid uses 4 columns at narrow widths so all options stay on
+   screen without scroll on a 360px viewport.                          */
+.captcha-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 1100; /* above the share modal (1000) */
+    background: rgba(2, 8, 20, 0.82);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    animation: captcha-fade 0.18s ease-out;
+}
+@keyframes captcha-fade { from { opacity: 0; } to { opacity: 1; } }
+.captcha-card {
+    width: 100%;
+    max-width: 520px;
+    background: var(--bg-card);
+    border-top: 3px solid var(--gold);
+    border-radius: 20px 20px 0 0;
+    padding: 22px 18px calc(22px + env(safe-area-inset-bottom));
+    box-shadow: 0 -10px 40px rgba(0, 0, 0, 0.55);
+    animation: captcha-slide 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+@keyframes captcha-slide { from { transform: translateY(100%); } to { transform: translateY(0); } }
+@media (min-width: 600px) {
+    .captcha-modal { align-items: center; }
+    .captcha-card { border-radius: 20px; }
+}
+.captcha-heading {
+    color: var(--gold);
+    font-family: var(--font-display);
+    font-size: 1.05rem;
+    margin: 0 0 6px;
+    letter-spacing: 0.4px;
+}
+.captcha-sub {
+    color: var(--text);
+    font-size: 0.95rem;
+    line-height: 1.35;
+    margin-bottom: 14px;
+}
+.captcha-options {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 8px;
+}
+.captcha-options-crests {
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+}
+.captcha-option {
+    background: var(--bg);
+    border: 2px solid transparent;
+    border-radius: 12px;
+    padding: 14px 12px;
+    color: var(--text);
+    font-family: var(--font-body);
+    font-size: 0.95rem;
+    cursor: pointer;
+    transition: transform 0.15s, border-color 0.15s, background 0.15s;
+    text-align: left;
+}
+.captcha-option-crest {
+    padding: 8px;
+    text-align: center;
+    aspect-ratio: 1 / 1.05;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.captcha-option-crest svg {
+    width: 100%;
+    height: auto;
+    max-height: 100%;
+}
+.captcha-option:hover:not([disabled]) {
+    border-color: rgba(219, 161, 17, 0.55);
+    background: var(--bg-card-hover);
+    transform: translateY(-1px);
+}
+.captcha-option[disabled] {
+    cursor: progress;
+    opacity: 0.7;
+}
+.captcha-option-correct {
+    border-color: #2da37a !important;
+    background: rgba(45, 163, 122, 0.18) !important;
+    animation: captcha-pulse 0.45s ease-out;
+}
+.captcha-option-wrong {
+    border-color: #d94646 !important;
+    background: rgba(217, 70, 70, 0.18) !important;
+    animation: captcha-shake 0.4s;
+}
+@keyframes captcha-pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(45, 163, 122, 0.55); }
+    100% { box-shadow: 0 0 0 14px rgba(45, 163, 122, 0); }
+}
+@keyframes captcha-shake {
+    10%, 90% { transform: translateX(-2px); }
+    20%, 80% { transform: translateX(3px); }
+    30%, 50%, 70% { transform: translateX(-5px); }
+    40%, 60% { transform: translateX(5px); }
+}
+.captcha-hint {
+    margin-top: 12px;
+    color: var(--text-dim);
+    font-size: 0.82rem;
+    min-height: 1.2em;
+    text-align: center;
+}
+.captcha-loading {
+    grid-column: 1 / -1;
+    text-align: center;
+    color: var(--text-dim);
+    padding: 28px 0;
+    font-size: 0.9rem;
+}

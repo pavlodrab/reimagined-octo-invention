@@ -369,6 +369,34 @@ var TRANSLATIONS = {
             confirm: 'Подтвердить'
         },
 
+        // Chelsea-themed CAPTCHA — first-vote anti-bot challenge
+        captcha: {
+            title: 'Подтверди, что ты фанат',
+            prompt_crest: 'Выбери герб Челси',
+            wrong_retry: 'Не угадал. Осталось попыток: {attempts}',
+            expired_retry: 'Время вышло, новый вопрос…',
+            too_many_tries: 'Слишком много попыток. Попробуй позже.',
+            // Trivia questions: each entry has a question key + per-option labels
+            trivia_q: {
+                kit_color: 'Какого цвета домашняя форма Chelsea?',
+                stadium: 'Как называется домашний стадион Chelsea?',
+                ucl_first_year: 'В каком году Chelsea впервые выиграл Лигу Чемпионов?',
+                city: 'В каком городе базируется Chelsea?',
+                ucl_second_year: 'Когда Chelsea второй раз выиграл Лигу Чемпионов?',
+                nickname: 'Как болельщики прозвали Chelsea?',
+                founded: 'В каком году основан клуб?'
+            },
+            trivia_a: {
+                kit_color: { blue: 'Синий', red: 'Красный', black: 'Чёрный', white: 'Белый' },
+                stadium: { stamford_bridge: 'Stamford Bridge', old_trafford: 'Old Trafford', anfield: 'Anfield', etihad: 'Etihad' },
+                ucl_first_year: { '2012': '2012', '2008': '2008', '2015': '2015', '2003': '2003' },
+                city: { london: 'Лондон', manchester: 'Манчестер', liverpool: 'Ливерпуль', newcastle: 'Ньюкасл' },
+                ucl_second_year: { '2021': '2021', '2014': '2014', '2017': '2017', '2019': '2019' },
+                nickname: { blues: 'Blues', reds: 'Reds', gunners: 'Gunners', spurs: 'Spurs' },
+                founded: { '1905': '1905', '1888': '1888', '1920': '1920', '1947': '1947' }
+            }
+        },
+
         // Toast messages
         toast: {
             saved: 'Сохранено',
@@ -959,6 +987,33 @@ var TRANSLATIONS = {
             cancel: 'Cancel',
             close: 'Close',
             confirm: 'Confirm'
+        },
+
+        // Chelsea-themed CAPTCHA — first-vote anti-bot challenge
+        captcha: {
+            title: 'Prove you are a fan',
+            prompt_crest: 'Pick the Chelsea crest',
+            wrong_retry: 'Wrong. Attempts left: {attempts}',
+            expired_retry: 'Time ran out, new question…',
+            too_many_tries: 'Too many attempts. Try again later.',
+            trivia_q: {
+                kit_color: 'What is the colour of Chelsea\u2019s home kit?',
+                stadium: 'What is Chelsea\u2019s home ground?',
+                ucl_first_year: 'In what year did Chelsea first win the Champions League?',
+                city: 'In which city is Chelsea based?',
+                ucl_second_year: 'When did Chelsea win the Champions League the second time?',
+                nickname: 'What is Chelsea\u2019s nickname?',
+                founded: 'In what year was the club founded?'
+            },
+            trivia_a: {
+                kit_color: { blue: 'Blue', red: 'Red', black: 'Black', white: 'White' },
+                stadium: { stamford_bridge: 'Stamford Bridge', old_trafford: 'Old Trafford', anfield: 'Anfield', etihad: 'Etihad' },
+                ucl_first_year: { '2012': '2012', '2008': '2008', '2015': '2015', '2003': '2003' },
+                city: { london: 'London', manchester: 'Manchester', liverpool: 'Liverpool', newcastle: 'Newcastle' },
+                ucl_second_year: { '2021': '2021', '2014': '2014', '2017': '2017', '2019': '2019' },
+                nickname: { blues: 'Blues', reds: 'Reds', gunners: 'Gunners', spurs: 'Spurs' },
+                founded: { '1905': '1905', '1888': '1888', '1920': '1920', '1947': '1947' }
+            }
         },
 
         // Toast messages

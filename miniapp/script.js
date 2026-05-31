@@ -94,18 +94,52 @@ const state = {
     allAdmins: [],
     allLogs: [],
     allBackgrounds: [],
+
+    // captcha proof token issued by /api/captcha/verify on first
+    // successful solve. Auto-attached as X-Captcha-Proof on every
+    // api() call. Persisted in sessionStorage so a page refresh
+    // mid-session doesn't make the user re-solve.
+    captchaProof: (function () {
+        try { return sessionStorage.getItem('captchaProof') || ''; } catch (_) { return ''; }
+    })(),
 };
 
 /* ═══ Helpers ═══ */
-function api(path, opts = {}) {
+/* api(): JSON fetch with auth headers + auto captcha re-prompt.
+   Telegram initData and demo user header are attached on every call.
+   When the backend returns 412 with `{captcha: true}`, we open the
+   captcha modal, wait for the user to solve it, store the proof, and
+   replay the original request exactly once with X-Captcha-Proof. */
+async function api(path, opts = {}) {
+    return _doApiCall(path, opts, /* allowCaptchaRetry */ true);
+}
+
+async function _doApiCall(path, opts, allowCaptchaRetry) {
     const headers = { 'Content-Type': 'application/json' };
     if (state.initData) headers['X-Init-Data'] = state.initData;
     if (state.demoUser) headers['X-Demo-User'] = JSON.stringify(state.demoUser);
-    return fetch(path, { ...opts, headers: { ...headers, ...(opts.headers || {}) } })
-        .then(async r => {
-            const text = await r.text();
-            try { return JSON.parse(text); } catch { return { success: false, error: text }; }
-        });
+    if (state.captchaProof) headers['X-Captcha-Proof'] = state.captchaProof;
+    const res = await fetch(path, {
+        ...opts,
+        headers: { ...headers, ...(opts.headers || {}) },
+    });
+    const text = await res.text();
+    let body;
+    try { body = JSON.parse(text); }
+    catch { body = { success: false, error: text }; }
+
+    // Captcha gate: 412 + captcha flag means the server wants us to
+    // solve a challenge before this request can succeed. Solve once,
+    // then replay with the freshly-issued proof header.
+    if (allowCaptchaRetry && res.status === 412 && body && body.captcha === true) {
+        const ok = await solveCaptchaModal();
+        if (ok) {
+            return _doApiCall(path, opts, /* allowCaptchaRetry */ false);
+        }
+        // User cancelled or kept failing — propagate the original 412
+        // so the caller can show its own error message.
+    }
+    return body;
 }
 
 function toast(msg, duration = 3000) {
@@ -2820,6 +2854,189 @@ async function shareCanvas(canvas, filename) {
     URL.revokeObjectURL(url);
     toast(t('share.card_ready'));
 }
+
+/* ═══ Chelsea CAPTCHA modal ═══════════════════════════════════════════
+   Activated when the api() helper sees a 412 + captcha:true response
+   (currently from the first-vote gate). Opens a modal, fetches a
+   challenge, renders 4 tappable options, ships the answer back, and
+   stores the resulting proof_token in state for subsequent calls.
+
+   Two challenge types come from the backend:
+     - "crest"  : pick the Chelsea club crest among 4. Each option has
+                  {id, abbr, color}; we render an SVG shield in the
+                  team's primary colour with the abbreviation.
+     - "trivia" : a multiple-choice club question. The backend sends
+                  an i18n_key plus 4 opaque option keys. The client
+                  looks them up in captcha.trivia.<key>.* (which
+                  contains both the question text and labelled options).
+
+   The modal builds DOM imperatively (no template literals) so it can be
+   shown before any tab content is mounted (e.g. on the very first vote
+   call). Cleans up its own root on close so a stale captcha doesn't
+   linger after the user navigates away.                                */
+
+function _captchaCrestSvg(option, sizePx) {
+    sizePx = sizePx || 96;
+    var color = option.color || '#034694';
+    var abbr = option.abbr || '?';
+    return '' +
+        '<svg viewBox="0 0 80 100" width="' + sizePx + '" height="' + Math.round(sizePx * 1.25) + '" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
+            '<defs>' +
+                '<linearGradient id="cg-' + option.id + '" x1="0" x2="0" y1="0" y2="1">' +
+                    '<stop offset="0" stop-color="' + color + '"/>' +
+                    '<stop offset="1" stop-color="rgba(0,0,0,0.55)"/>' +
+                '</linearGradient>' +
+            '</defs>' +
+            '<path d="M 6 8 L 74 8 L 74 50 Q 74 84 40 96 Q 6 84 6 50 Z" ' +
+                'fill="url(#cg-' + option.id + ')" stroke="rgba(255,255,255,0.45)" stroke-width="1.5"/>' +
+            '<text x="40" y="56" text-anchor="middle" font-size="22" font-weight="800" ' +
+                'fill="#ffffff" font-family="\'Russo One\', \'Oswald\', sans-serif" letter-spacing="1">' + abbr + '</text>' +
+        '</svg>';
+}
+
+function _closeCaptchaModal(rootEl) {
+    try { rootEl.parentNode && rootEl.parentNode.removeChild(rootEl); } catch (_) {}
+    document.body.style.overflow = '';
+}
+
+/* solveCaptchaModal — returns a Promise<boolean>: true when the user
+   passes the captcha (proof now in state.captchaProof), false when
+   they cancel or run out of attempts. Caller decides what to do with
+   the result; api() retries the original request when true.            */
+function solveCaptchaModal() {
+    return new Promise(function (resolve) {
+        // Close any prior modal — only one captcha at a time.
+        var existing = document.getElementById('captcha-modal');
+        if (existing) existing.parentNode.removeChild(existing);
+
+        var root = document.createElement('div');
+        root.id = 'captcha-modal';
+        root.className = 'captcha-modal';
+        root.setAttribute('role', 'dialog');
+        root.setAttribute('aria-modal', 'true');
+        root.setAttribute('aria-labelledby', 'captcha-modal-title');
+        document.body.appendChild(root);
+        document.body.style.overflow = 'hidden';
+
+        var card = document.createElement('div');
+        card.className = 'captcha-card';
+        root.appendChild(card);
+
+        // Click-outside to cancel — same UX as the share modal.
+        root.addEventListener('click', function (ev) {
+            if (ev.target === root) {
+                _closeCaptchaModal(root);
+                resolve(false);
+            }
+        });
+
+        var heading = document.createElement('h3');
+        heading.id = 'captcha-modal-title';
+        heading.className = 'captcha-heading';
+        heading.textContent = t('captcha.title');
+        card.appendChild(heading);
+
+        var sub = document.createElement('div');
+        sub.className = 'captcha-sub';
+        card.appendChild(sub);
+
+        var optionsHost = document.createElement('div');
+        optionsHost.className = 'captcha-options';
+        card.appendChild(optionsHost);
+
+        var hint = document.createElement('div');
+        hint.className = 'captcha-hint';
+        card.appendChild(hint);
+
+        var attemptsLeft = 3;
+
+        function render(challenge) {
+            optionsHost.innerHTML = '';
+            optionsHost.classList.toggle('captcha-options-crests', challenge.type === 'crest');
+            sub.textContent = challenge.type === 'crest'
+                ? t('captcha.prompt_crest')
+                : t('captcha.trivia_q.' + challenge.i18n_key);
+            (challenge.options || []).forEach(function (opt, idx) {
+                var btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'captcha-option';
+                if (challenge.type === 'crest') {
+                    btn.className += ' captcha-option-crest';
+                    btn.innerHTML = _captchaCrestSvg(opt);
+                    btn.setAttribute('aria-label', opt.abbr || '');
+                } else {
+                    btn.textContent = t('captcha.trivia_a.' + challenge.i18n_key + '.' + opt);
+                }
+                btn.addEventListener('click', function () { onPick(challenge, idx, btn); });
+                optionsHost.appendChild(btn);
+            });
+        }
+
+        async function onPick(challenge, idx, btn) {
+            // Lock all buttons to prevent double-submits.
+            optionsHost.querySelectorAll('button').forEach(function (b) {
+                b.setAttribute('disabled', '');
+            });
+            try {
+                var verifyRes = await _doApiCall('/api/captcha/verify', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        challenge_token: challenge.challenge_token,
+                        answer: idx,
+                    }),
+                }, /* allowCaptchaRetry */ false);
+                if (verifyRes && verifyRes.success && verifyRes.proof_token) {
+                    state.captchaProof = verifyRes.proof_token;
+                    try { sessionStorage.setItem('captchaProof', verifyRes.proof_token); } catch (_) {}
+                    btn.classList.add('captcha-option-correct');
+                    setTimeout(function () {
+                        _closeCaptchaModal(root);
+                        resolve(true);
+                    }, 350);
+                    return;
+                }
+                // Wrong / expired / invalid — retry up to attemptsLeft.
+                btn.classList.add('captcha-option-wrong');
+                attemptsLeft -= 1;
+                if (attemptsLeft <= 0) {
+                    hint.textContent = t('captcha.too_many_tries');
+                    setTimeout(function () {
+                        _closeCaptchaModal(root);
+                        resolve(false);
+                    }, 1500);
+                    return;
+                }
+                hint.textContent = (verifyRes && verifyRes.error === 'captcha_expired')
+                    ? t('captcha.expired_retry')
+                    : t('captcha.wrong_retry').replace('{attempts}', String(attemptsLeft));
+                // Refresh challenge so a different layout shows up.
+                fetchAndRender();
+            } catch (_) {
+                hint.textContent = t('common.error');
+                optionsHost.querySelectorAll('button').forEach(function (b) {
+                    b.removeAttribute('disabled');
+                });
+            }
+        }
+
+        async function fetchAndRender() {
+            optionsHost.innerHTML = '<div class="captcha-loading">' + t('common.loading') + '</div>';
+            try {
+                var res = await _doApiCall('/api/captcha/challenge', {}, /* allowCaptchaRetry */ false);
+                if (!res || !res.success || !res.challenge) {
+                    hint.textContent = t('common.error');
+                    return;
+                }
+                render(res.challenge);
+            } catch (_) {
+                hint.textContent = t('common.error');
+            }
+        }
+
+        fetchAndRender();
+    });
+}
+
 
 /* ═══ SSE Live Updates ═══ */
 
