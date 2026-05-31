@@ -1741,3 +1741,112 @@ html[data-user-bg="1"] body::after {
     margin-top: 6px;
     line-height: 1.35;
 }
+
+
+
+/* ─────────────────────────────────────────────────────────────────
+   Share Card variant picker (full-screen modal).
+   Three preview tiles: A/B square, C tall (9:16). Tap one to render
+   the full-size card and trigger the share sheet.
+   ───────────────────────────────────────────────────────────────── */
+.share-modal-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+    background: rgba(0,0,0,0.78);
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    padding: 20px;
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    animation: shareModalFadeIn 0.18s ease-out;
+}
+@keyframes shareModalFadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+.share-modal {
+    width: 100%;
+    max-width: 480px;
+    background: var(--bg-card);
+    border-radius: 20px 20px 0 0;
+    padding: 18px 16px 24px;
+    box-shadow: 0 -8px 40px rgba(0,0,0,0.5);
+    animation: shareModalSlideUp 0.22s ease-out;
+}
+@media (min-width: 600px) {
+    .share-modal-overlay { align-items: center; }
+    .share-modal { border-radius: 20px; }
+}
+@keyframes shareModalSlideUp {
+    from { transform: translateY(40px); opacity: 0; }
+    to   { transform: translateY(0);    opacity: 1; }
+}
+.share-modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 14px;
+}
+.share-modal-header h3 {
+    margin: 0;
+    color: var(--gold);
+    font-size: 1.1rem;
+}
+.share-modal-close {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font-size: 1.2rem;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 6px;
+}
+.share-modal-close:hover { background: var(--bg); color: var(--text); }
+.share-variants {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 10px;
+}
+.share-variant {
+    cursor: pointer;
+    border-radius: 12px;
+    overflow: hidden;
+    border: 2px solid transparent;
+    background: var(--bg);
+    transition: transform 0.12s, border-color 0.12s, box-shadow 0.12s;
+    display: flex;
+    flex-direction: column;
+}
+.share-variant:hover {
+    transform: translateY(-2px);
+    border-color: var(--gold);
+    box-shadow: 0 8px 24px rgba(219,161,17,0.25);
+}
+.share-variant:active { transform: scale(0.97); }
+.share-variant-canvas {
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    overflow: hidden;
+    background: #0a1628;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.share-variant[data-variant="C"] .share-variant-canvas {
+    aspect-ratio: 9 / 16;
+}
+.share-variant-canvas canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+.share-variant-label {
+    text-align: center;
+    padding: 8px 4px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--text);
+    background: var(--bg-card-hover);
+}

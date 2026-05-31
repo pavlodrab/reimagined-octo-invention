@@ -1655,34 +1655,10 @@ async function generateResultCard(pollId) {
 }
 
 async function shareResultCard(pollId) {
-    toast(t('share.downloading'));
-    try {
-        var canvas = await generateResultCard(pollId);
-        if (!canvas) return;
-
-        canvas.toBlob(function(blob) {
-            if (!blob) { toast(t('common.error')); return; }
-
-            // Try Web Share API first
-            if (navigator.share && navigator.canShare) {
-                var file = new File([blob], 'chelsea-results.png', { type: 'image/png' });
-                var shareData = { files: [file], title: 'Chelsea Match Results' };
-                if (navigator.canShare(shareData)) {
-                    navigator.share(shareData).then(function() {
-                        toast(t('share.card_ready'));
-                    }).catch(function() {
-                        downloadBlob(blob);
-                    });
-                    return;
-                }
-            }
-
-            // Fallback: download
-            downloadBlob(blob);
-        }, 'image/png');
-    } catch (e) {
-        toast(t('common.error'));
-    }
+    // New flow: open the variant picker, let the user pick A/B/C, then
+    // generate + share. Old single-variant generation is preserved as
+    // generateCardCommunityTop5 for callers that may still reference it.
+    return openShareCardPicker(pollId);
 }
 
 function downloadBlob(blob) {
@@ -3517,3 +3493,711 @@ window.addEventListener('load', function () {
         }
     }, { passive: true });
 })();
+
+
+
+/* ═════════════════════════════════════════════════════════════════
+   Share Card — three canvas-rendered variants
+   ─────────────────────────────────────────────────────────────────
+   The user opens a picker modal that thumbnails all three variants,
+   picks one, then sees a full-size preview with Share / Download.
+
+   Variants:
+     A: Lineup formation         1080×1080  — pitch + all players + my ratings
+     B: MVP Cover                1080×1080  — single hero player, magazine cover
+     C: Stats Vertical (9:16)    1080×1920  — stories-format with top 3 + stats
+
+   Data is fetched once via /api/share/<poll_id>, then all renders draw
+   from the same payload. Player photos are loaded with CORS=anonymous;
+   if a load fails (CORS rejection / 404) we fall back to a colored
+   circle with the player's initials so the card never breaks.
+   ═════════════════════════════════════════════════════════════════ */
+
+var SHARE_BG = '#022d5c';
+var SHARE_BG_DEEP = '#0a1628';
+var SHARE_BLUE = '#034694';
+var SHARE_BLUE_LIGHT = '#0563c1';
+var SHARE_GOLD = '#DBA111';
+var SHARE_GOLD_LIGHT = '#f0c040';
+
+function _shareDisplayFont(weight) {
+    // The mini-app body may be rendering with a Google-Fonts preset
+    // (Russo One / Oswald / Manrope) but the share canvas is captured
+    // as pixels — we want a stable, system-available font that's bold
+    // and Cyrillic-friendly. Using 'Impact' as the lead with safe
+    // fallbacks keeps the export consistent across devices.
+    var w = weight || 800;
+    return w + ' ${px}px Impact, "Arial Black", "Helvetica Neue", sans-serif';
+}
+function _shareBodyFont(weight, italic) {
+    var w = weight || 600;
+    var i = italic ? 'italic ' : '';
+    return i + w + ' ${px}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+}
+
+// Tiny string-template helper to avoid sprinkling .replace('${px}', ...)
+// at every callsite. Pass a template returned by _shareDisplayFont/etc
+// and the desired pixel size, get a font shorthand back.
+function _font(template, px) { return template.replace('${px}', String(px)); }
+
+function _initials(name) {
+    if (!name) return '?';
+    var parts = String(name).trim().split(/\s+/);
+    var s = parts[0][0] || '?';
+    if (parts.length > 1) s += parts[parts.length - 1][0] || '';
+    return s.toUpperCase();
+}
+
+function _loadImage(url) {
+    // Load with CORS so the resulting canvas isn't tainted (toBlob would
+    // throw SecurityError otherwise). On failure (CORS missing / 404 /
+    // network) the promise rejects and the caller draws a placeholder.
+    return new Promise(function (resolve, reject) {
+        if (!url) return reject(new Error('no url'));
+        var img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = function () { resolve(img); };
+        img.onerror = function () { reject(new Error('image failed')); };
+        img.src = url;
+    });
+}
+
+function _roundRect(ctx, x, y, w, h, r) {
+    var rr = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.arcTo(x + w, y,     x + w, y + h, rr);
+    ctx.arcTo(x + w, y + h, x,     y + h, rr);
+    ctx.arcTo(x,     y + h, x,     y,     rr);
+    ctx.arcTo(x,     y,     x + w, y,     rr);
+    ctx.closePath();
+}
+
+function _drawPlayerPhoto(ctx, img, x, y, size, opts) {
+    // Square photo with rounded corners. opts.desaturate=true draws as
+    // grayscale (variant A's monochrome roster look). opts.fallbackName
+    // picks the placeholder initials if we never got the image.
+    opts = opts || {};
+    var radius = opts.radius != null ? opts.radius : Math.round(size * 0.12);
+    ctx.save();
+    _roundRect(ctx, x, y, size, size, radius);
+    ctx.clip();
+    if (img) {
+        if (opts.desaturate) {
+            ctx.filter = 'grayscale(100%) contrast(1.1)';
+        }
+        // Cover-fit: scale up & crop center.
+        var iw = img.naturalWidth, ih = img.naturalHeight;
+        var scale = Math.max(size / iw, size / ih);
+        var sw = size / scale, sh = size / scale;
+        var sx = (iw - sw) / 2, sy = (ih - sh) / 2;
+        ctx.drawImage(img, sx, sy, sw, sh, x, y, size, size);
+        ctx.filter = 'none';
+    } else {
+        // Placeholder: gradient + initials.
+        var grad = ctx.createLinearGradient(x, y, x + size, y + size);
+        grad.addColorStop(0, SHARE_BLUE);
+        grad.addColorStop(1, SHARE_BLUE_LIGHT);
+        ctx.fillStyle = grad;
+        ctx.fillRect(x, y, size, size);
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.font = _font(_shareDisplayFont(800), Math.round(size * 0.4));
+        ctx.fillText(_initials(opts.fallbackName), x + size / 2, y + size / 2);
+    }
+    ctx.restore();
+}
+
+function _drawAvatarCircle(ctx, img, cx, cy, radius, opts) {
+    opts = opts || {};
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.clip();
+    if (img) {
+        var iw = img.naturalWidth, ih = img.naturalHeight;
+        var scale = Math.max((radius * 2) / iw, (radius * 2) / ih);
+        var sw = (radius * 2) / scale, sh = (radius * 2) / scale;
+        var sx = (iw - sw) / 2, sy = (ih - sh) / 2;
+        ctx.drawImage(img, sx, sy, sw, sh, cx - radius, cy - radius, radius * 2, radius * 2);
+    } else {
+        var grad = ctx.createLinearGradient(cx - radius, cy - radius, cx + radius, cy + radius);
+        grad.addColorStop(0, SHARE_BLUE);
+        grad.addColorStop(1, SHARE_GOLD);
+        ctx.fillStyle = grad;
+        ctx.fillRect(cx - radius, cy - radius, radius * 2, radius * 2);
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.font = _font(_shareDisplayFont(800), Math.round(radius * 0.7));
+        ctx.fillText(_initials(opts.fallbackName), cx, cy);
+    }
+    ctx.restore();
+    // Gold ring
+    ctx.strokeStyle = opts.ringColor || SHARE_GOLD;
+    ctx.lineWidth = opts.ringWidth || Math.max(3, radius * 0.06);
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.stroke();
+}
+
+function _drawRatingBubble(ctx, cx, cy, radius, value) {
+    // Gold-filled circle with the rating number (e.g. "9.5"). Used in
+    // the lineup variant next to each player and in the MVP cover.
+    var grad = ctx.createRadialGradient(cx - radius * 0.3, cy - radius * 0.3, 0, cx, cy, radius);
+    grad.addColorStop(0, SHARE_GOLD_LIGHT);
+    grad.addColorStop(1, SHARE_GOLD);
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#0a1628';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    var label = (value == null || isNaN(value)) ? '—' : (Number(value) % 1 === 0 ? String(value) : Number(value).toFixed(1));
+    ctx.font = _font(_shareDisplayFont(800), Math.round(radius * 1.05));
+    ctx.fillText(label, cx, cy + radius * 0.05);
+}
+
+/* ── Formation layout for variant A ────────────────────────────────
+   Picks normalized positions (0..1 in x and y) for up to 11 starters.
+   Falls back to 3-row distribution if formation can't be inferred.
+   Returns an array of {x: 0..1, y: 0..1} the same length as `starters`.
+*/
+function _computeFormation(starters) {
+    var n = starters.length;
+    if (n === 0) return [];
+    // Recognize common shapes by count buckets if positions are unknown:
+    // n=11 → 4-3-3 default, n=10 fallback to 4-4-2-ish minus one, etc.
+    // We tag each starter by position prefix when available.
+    var rows = { GK: [], DEF: [], MID: [], FWD: [] };
+    var unknown = [];
+    starters.forEach(function (p) {
+        var pos = (p.position || '').toUpperCase();
+        if (pos.indexOf('GK') === 0 || pos === 'G' || pos === 'GOAL') rows.GK.push(p);
+        else if (pos.indexOf('D') === 0 || pos.indexOf('CB') === 0 || pos.indexOf('LB') === 0 || pos.indexOf('RB') === 0 || pos.indexOf('FB') === 0 || pos === 'WB') rows.DEF.push(p);
+        else if (pos.indexOf('M') === 0 || pos === 'CDM' || pos === 'CAM') rows.MID.push(p);
+        else if (pos.indexOf('F') === 0 || pos.indexOf('W') === 0 || pos === 'ST' || pos === 'CF') rows.FWD.push(p);
+        else unknown.push(p);
+    });
+    // If positions weren't tagged at all, use jersey numbers as a hint
+    // (1 = GK, 2-5 def-ish, etc). Otherwise distribute unknowns into MID.
+    if (rows.GK.length + rows.DEF.length + rows.MID.length + rows.FWD.length < 4) {
+        return _formationFromCount(starters);
+    }
+    unknown.forEach(function (p) { rows.MID.push(p); });
+    // Assemble row-by-row, top to bottom. Top of canvas = forwards
+    // (attacking direction up, which mirrors the user's example).
+    var pos = [];
+    var rowDefs = [
+        { players: rows.FWD, y: 0.18 },
+        { players: rows.MID, y: 0.45 },
+        { players: rows.DEF, y: 0.72 },
+        { players: rows.GK,  y: 0.92 },
+    ];
+    rowDefs.forEach(function (r) {
+        var k = r.players.length;
+        if (k === 0) return;
+        for (var i = 0; i < k; i++) {
+            var x = (k === 1) ? 0.5 : (0.12 + (i / (k - 1)) * 0.76);
+            pos.push({ player: r.players[i], x: x, y: r.y });
+        }
+    });
+    return pos;
+}
+
+function _formationFromCount(starters) {
+    // Fallback: just split into three rows by index. Not realistic but
+    // looks fine if positional data is missing entirely.
+    var pos = [];
+    var n = starters.length;
+    var rows = [Math.ceil(n / 3), Math.ceil(n / 3), n - 2 * Math.ceil(n / 3)];
+    var ys = [0.22, 0.5, 0.78];
+    var idx = 0;
+    for (var r = 0; r < 3; r++) {
+        var k = rows[r];
+        for (var i = 0; i < k; i++) {
+            var x = (k === 1) ? 0.5 : (0.12 + (i / (k - 1)) * 0.76);
+            pos.push({ player: starters[idx++], x: x, y: ys[r] });
+            if (idx >= n) break;
+        }
+        if (idx >= n) break;
+    }
+    return pos;
+}
+
+/* ── Variant A: Lineup ─────────────────────────────────────────── */
+async function drawCardLineup(ctx, data, W, H) {
+    var lineup = (data.lineup || []).slice();
+    var starters = lineup.filter(function (p) { return p.is_starter; });
+    var subs = lineup.filter(function (p) { return !p.is_starter; }).slice(0, 5);
+
+    // Background — chelsea blue, slightly darker at the top
+    var grad = ctx.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, '#0a1f4d');
+    grad.addColorStop(1, '#062052');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+
+    // Pitch lines (subtle, like the example image)
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.lineWidth = 2;
+    var px = 60, py = 200, pw = W - 120, ph = H - 380;
+    ctx.strokeRect(px, py, pw, ph);
+    // Center circle
+    ctx.beginPath();
+    ctx.arc(W / 2, py + ph / 2, 110, 0, Math.PI * 2);
+    ctx.stroke();
+    // Center line
+    ctx.beginPath();
+    ctx.moveTo(px, py + ph / 2);
+    ctx.lineTo(px + pw, py + ph / 2);
+    ctx.stroke();
+    // Penalty boxes
+    ctx.strokeRect(px + pw * 0.2, py, pw * 0.6, 100);
+    ctx.strokeRect(px + pw * 0.2, py + ph - 100, pw * 0.6, 100);
+
+    // Header strip
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.font = _font(_shareDisplayFont(800), 96);
+    ctx.fillText('ЧЕЛСИ', 60, 40);
+    // vs Opponent + tour + date (parsed from poll.title best-effort)
+    var titleText = (data.poll && data.poll.title) || '';
+    ctx.fillStyle = '#fff';
+    ctx.font = _font(_shareBodyFont(700), 30);
+    ctx.fillText(titleText.slice(0, 38), 60, 145);
+
+    // Brand bug top right
+    ctx.fillStyle = SHARE_GOLD;
+    ctx.beginPath();
+    ctx.arc(W - 90, 90, 50, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#0a1628';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = _font(_shareDisplayFont(800), 56);
+    ctx.fillText('CFC', W - 90, 92);
+
+    // Preload all photos in parallel; use null for any that fail.
+    var allPlayers = starters.concat(subs);
+    var imgs = await Promise.all(allPlayers.map(function (p) {
+        return _loadImage(p.photo_url).catch(function () { return null; });
+    }));
+    var imgFor = {};
+    allPlayers.forEach(function (p, i) { imgFor[p.player_id] = imgs[i]; });
+
+    // Place starters on the pitch
+    var positions = _computeFormation(starters);
+    var photoSize = 130;
+    positions.forEach(function (slot) {
+        var p = slot.player;
+        var cx = px + slot.x * pw;
+        var cy = py + slot.y * ph;
+        var x = cx - photoSize / 2;
+        var y = cy - photoSize / 2;
+        _drawPlayerPhoto(ctx, imgFor[p.player_id], x, y, photoSize, {
+            desaturate: true, radius: 18, fallbackName: p.name,
+        });
+        // My rating bubble (top-right of photo) — only if voted
+        if (p.my_rating != null) {
+            _drawRatingBubble(ctx, x + photoSize - 14, y + 14, 32, p.my_rating);
+        } else if (p.number != null) {
+            // No rating → show jersey number instead
+            ctx.fillStyle = '#fff';
+            ctx.beginPath();
+            ctx.arc(x + photoSize - 14, y + 14, 26, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = SHARE_BLUE;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.font = _font(_shareDisplayFont(800), 28);
+            ctx.fillText(String(p.number), x + photoSize - 14, y + 16);
+        }
+        // Name underneath
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.font = _font(_shareBodyFont(700), 24);
+        var nm = p.name || '';
+        if (nm.length > 14) nm = nm.slice(0, 13) + '…';
+        ctx.fillText(nm, cx, y + photoSize + 8);
+    });
+
+    // Subs strip
+    var subY = H - 150;
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.font = _font(_shareDisplayFont(800), 28);
+    ctx.fillText('ЗАМЕНЫ', 60, subY - 60);
+    var subSize = 90;
+    var subSpacing = 110;
+    var subStartX = 60;
+    subs.forEach(function (p, i) {
+        var x = subStartX + i * subSpacing;
+        var y = subY - subSize / 2;
+        _drawPlayerPhoto(ctx, imgFor[p.player_id], x, y, subSize, {
+            desaturate: true, radius: 12, fallbackName: p.name,
+        });
+        if (p.my_rating != null) {
+            _drawRatingBubble(ctx, x + subSize - 8, y + 8, 22, p.my_rating);
+        }
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.font = _font(_shareBodyFont(700), 18);
+        var nm = (p.name || '').split(' ').pop();
+        if (nm.length > 10) nm = nm.slice(0, 9) + '…';
+        ctx.fillText(nm, x + subSize / 2, y + subSize + 4);
+    });
+
+    // Brand mark bottom right
+    ctx.fillStyle = SHARE_GOLD;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'bottom';
+    ctx.font = _font(_shareBodyFont(700), 22);
+    ctx.fillText('@ChelseaVotingBot', W - 60, H - 50);
+}
+
+/* ── Variant B: MVP Cover ──────────────────────────────────────── */
+async function drawCardMvp(ctx, data, W, H) {
+    var lineup = data.lineup || [];
+    // MVP = the player I rated highest. Tie-break: community rank.
+    var rated = lineup.filter(function (p) { return p.my_rating != null; });
+    rated.sort(function (a, b) {
+        if (b.my_rating !== a.my_rating) return b.my_rating - a.my_rating;
+        return (a.community_rank || 999) - (b.community_rank || 999);
+    });
+    var mvp = rated[0] || lineup[0] || {};
+    var maxRating = data.max_rating || 10;
+
+    // Deep blue base + diagonal gold stripe
+    ctx.fillStyle = '#020e2c';
+    ctx.fillRect(0, 0, W, H);
+    var stripGrad = ctx.createLinearGradient(0, 0, W, H);
+    stripGrad.addColorStop(0, '#0a2c70');
+    stripGrad.addColorStop(0.55, '#0a1f4d');
+    stripGrad.addColorStop(1, '#020e2c');
+    ctx.fillStyle = stripGrad;
+    ctx.fillRect(0, 0, W, H);
+
+    // Gold diagonal accent
+    ctx.save();
+    ctx.translate(W * 0.55, H * 0.5);
+    ctx.rotate(-0.4);
+    var stripeGrad = ctx.createLinearGradient(-W, 0, W, 0);
+    stripeGrad.addColorStop(0, 'rgba(219,161,17,0)');
+    stripeGrad.addColorStop(0.5, 'rgba(219,161,17,0.4)');
+    stripeGrad.addColorStop(1, 'rgba(219,161,17,0)');
+    ctx.fillStyle = stripeGrad;
+    ctx.fillRect(-W, -60, 2 * W, 120);
+    ctx.restore();
+
+    // Player photo: large square on the right
+    var photoSize = Math.round(H * 0.62);
+    var photoX = W - photoSize - 60;
+    var photoY = (H - photoSize) / 2 + 40;
+    var img = null;
+    try { img = await _loadImage(mvp.photo_url); } catch (e) { img = null; }
+    _drawPlayerPhoto(ctx, img, photoX, photoY, photoSize, {
+        desaturate: true, radius: 24, fallbackName: mvp.name,
+    });
+    // Outer gold border on photo
+    ctx.strokeStyle = SHARE_GOLD;
+    ctx.lineWidth = 6;
+    _roundRect(ctx, photoX, photoY, photoSize, photoSize, 24);
+    ctx.stroke();
+
+    // Left-side typography stack
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    // "MVP" small label
+    ctx.fillStyle = SHARE_GOLD;
+    ctx.font = _font(_shareDisplayFont(800), 36);
+    ctx.fillText('MVP МАТЧА', 60, 100);
+    // Surname HUGE (split on whitespace, take last token)
+    var surname = ((mvp.name || '').trim().split(/\s+/).pop() || '—').toUpperCase();
+    var nameSize = 200;
+    if (surname.length > 8) nameSize = 160;
+    if (surname.length > 11) nameSize = 130;
+    if (surname.length > 14) nameSize = 110;
+    ctx.fillStyle = '#fff';
+    ctx.font = _font(_shareDisplayFont(900), nameSize);
+    ctx.fillText(surname, 60, 150);
+    // Rating MASSIVE in gold
+    ctx.fillStyle = SHARE_GOLD;
+    ctx.font = _font(_shareDisplayFont(900), 320);
+    var ratingLabel = (mvp.my_rating == null) ? '—' :
+        (Number(mvp.my_rating) % 1 === 0 ? String(mvp.my_rating) : Number(mvp.my_rating).toFixed(1));
+    ctx.fillText(ratingLabel, 60, 380);
+    // /max-rating below the rating
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.font = _font(_shareDisplayFont(700), 60);
+    var rWidth = ctx.measureText(ratingLabel).width;
+    ctx.fillText(' / ' + maxRating, 60 + rWidth, 540);
+
+    // Match strip
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.font = _font(_shareBodyFont(600), 30);
+    var titleText = (data.poll && data.poll.title) || '';
+    ctx.fillText('Челси ' + (titleText.slice(0, 36)), 60, 760);
+
+    // Bottom-left: my mini avatar + handle
+    var stats = data.my || {};
+    var avatarImg = null;
+    try { avatarImg = await _loadImage(stats.telegram_photo_url); } catch (e) { avatarImg = null; }
+    _drawAvatarCircle(ctx, avatarImg, 110, H - 100, 50, {
+        fallbackName: (stats.first_name || '') + ' ' + (stats.last_name || ''),
+        ringColor: SHARE_GOLD, ringWidth: 4,
+    });
+    var handleParts = [];
+    if (stats.username) handleParts.push('@' + stats.username);
+    var idStr = stats.custom_id || stats.auto_id;
+    if (idStr) handleParts.push(idStr);
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.font = _font(_shareBodyFont(700), 28);
+    ctx.fillText(handleParts.join('  •  '), 180, H - 100);
+
+    // Brand mark bottom right
+    ctx.fillStyle = SHARE_GOLD;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'bottom';
+    ctx.font = _font(_shareBodyFont(700), 24);
+    ctx.fillText('@ChelseaVotingBot', W - 60, H - 60);
+}
+
+/* ── Variant C: Stats Vertical 9:16 ────────────────────────────── */
+async function drawCardStats(ctx, data, W, H) {
+    var bg = ctx.createLinearGradient(0, 0, 0, H);
+    bg.addColorStop(0, '#0a1f4d');
+    bg.addColorStop(0.45, '#062052');
+    bg.addColorStop(1, '#0a1628');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, W, H);
+
+    // Subtle pitch grid
+    ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+    ctx.lineWidth = 1;
+    for (var gy = 0; gy < H; gy += 80) {
+        ctx.beginPath();
+        ctx.moveTo(0, gy);
+        ctx.lineTo(W, gy);
+        ctx.stroke();
+    }
+
+    var stats = data.my || {};
+    var statsBlock = data.stats || {};
+
+    // Header: avatar + name + handle
+    var avatarImg = null;
+    try { avatarImg = await _loadImage(stats.telegram_photo_url); } catch (e) { avatarImg = null; }
+    _drawAvatarCircle(ctx, avatarImg, 140, 200, 90, {
+        fallbackName: (stats.first_name || '') + ' ' + (stats.last_name || ''),
+    });
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.font = _font(_shareDisplayFont(800), 64);
+    var fullName = ((stats.first_name || '') + ' ' + (stats.last_name || '')).trim() || '—';
+    if (fullName.length > 18) fullName = fullName.slice(0, 17) + '…';
+    ctx.fillText(fullName, 260, 130);
+    ctx.fillStyle = SHARE_GOLD_LIGHT;
+    ctx.font = _font(_shareBodyFont(600), 36);
+    ctx.fillText(stats.username ? '@' + stats.username : (stats.custom_id || stats.auto_id || ''), 260, 220);
+
+    // Title: "Мои оценки vs ..."
+    ctx.fillStyle = SHARE_GOLD;
+    ctx.font = _font(_shareDisplayFont(800), 56);
+    ctx.fillText('МОИ ОЦЕНКИ', 60, 360);
+    ctx.fillStyle = '#fff';
+    ctx.font = _font(_shareBodyFont(600), 34);
+    var titleText = (data.poll && data.poll.title) || '';
+    ctx.fillText(titleText.slice(0, 30), 60, 432);
+
+    // Top 3 of my ratings
+    var rated = (data.lineup || []).filter(function (p) { return p.my_rating != null; });
+    rated.sort(function (a, b) { return b.my_rating - a.my_rating; });
+    var top3 = rated.slice(0, 3);
+
+    // Preload photos
+    var photos = await Promise.all(top3.map(function (p) {
+        return _loadImage(p.photo_url).catch(function () { return null; });
+    }));
+
+    var rankColors = [SHARE_GOLD, '#c0c0c0', '#cd7f32'];
+    var startY = 540;
+    var rowH = 200;
+    top3.forEach(function (p, i) {
+        var y = startY + i * rowH;
+        // Rank circle
+        ctx.fillStyle = rankColors[i];
+        ctx.beginPath();
+        ctx.arc(110, y + rowH / 2 - 20, 50, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#0a1628';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.font = _font(_shareDisplayFont(900), 64);
+        ctx.fillText(String(i + 1), 110, y + rowH / 2 - 18);
+
+        // Photo
+        var photoSize = 140;
+        _drawPlayerPhoto(ctx, photos[i], 200, y + (rowH - photoSize) / 2 - 20, photoSize, {
+            desaturate: false, radius: 16, fallbackName: p.name,
+        });
+
+        // Name
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.font = _font(_shareDisplayFont(800), 56);
+        var nm = p.name || '';
+        if (nm.length > 16) nm = nm.slice(0, 15) + '…';
+        ctx.fillText(nm, 370, y + rowH / 2 - 30);
+
+        // Rating
+        ctx.fillStyle = SHARE_GOLD;
+        ctx.font = _font(_shareDisplayFont(900), 80);
+        ctx.textAlign = 'right';
+        var lbl = Number(p.my_rating) % 1 === 0 ? String(p.my_rating) : Number(p.my_rating).toFixed(1);
+        ctx.fillText(lbl, W - 60, y + rowH / 2 - 25);
+    });
+
+    // Stat strip near bottom
+    var stripY = H - 360;
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    _roundRect(ctx, 60, stripY, W - 120, 200, 24);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(219,161,17,0.5)';
+    ctx.lineWidth = 2;
+    _roundRect(ctx, 60, stripY, W - 120, 200, 24);
+    ctx.stroke();
+
+    var cells = [
+        { label: 'XP', value: String(statsBlock.total_xp || 0) },
+        { label: 'СЕРИЯ', value: String(statsBlock.current_streak || 0) },
+        { label: 'ВСЕГО ГОЛОСОВ', value: String(stats.total_votes || 0) },
+    ];
+    var cellW = (W - 120) / cells.length;
+    cells.forEach(function (c, i) {
+        var cx = 60 + i * cellW + cellW / 2;
+        ctx.fillStyle = SHARE_GOLD;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.font = _font(_shareDisplayFont(900), 80);
+        ctx.fillText(c.value, cx, stripY + 30);
+        ctx.fillStyle = 'rgba(255,255,255,0.7)';
+        ctx.font = _font(_shareBodyFont(600), 26);
+        ctx.fillText(c.label, cx, stripY + 130);
+    });
+
+    // Brand mark
+    ctx.fillStyle = SHARE_GOLD;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.font = _font(_shareBodyFont(700), 30);
+    ctx.fillText('@ChelseaVotingBot', W / 2, H - 60);
+}
+
+/* ── Render dispatch ─────────────────────────────────────────────── */
+async function _renderShareCard(variant, data) {
+    var dims = (variant === 'C') ? { w: 1080, h: 1920 } : { w: 1080, h: 1080 };
+    var canvas = document.createElement('canvas');
+    canvas.width = dims.w;
+    canvas.height = dims.h;
+    var ctx = canvas.getContext('2d');
+    if (variant === 'A') await drawCardLineup(ctx, data, dims.w, dims.h);
+    else if (variant === 'B') await drawCardMvp(ctx, data, dims.w, dims.h);
+    else await drawCardStats(ctx, data, dims.w, dims.h);
+    return canvas;
+}
+
+/* ── Picker modal ─────────────────────────────────────────────── */
+async function openShareCardPicker(pollId) {
+    toast(t('share.downloading'));
+    var data;
+    try {
+        data = await api('/api/share/' + encodeURIComponent(pollId));
+        if (!data.success) throw new Error('share data fetch failed');
+    } catch (e) {
+        toast(t('common.error'));
+        return;
+    }
+
+    // Build the modal scaffold
+    var overlay = document.createElement('div');
+    overlay.className = 'share-modal-overlay';
+    overlay.innerHTML =
+        '<div class="share-modal">' +
+        '  <div class="share-modal-header">' +
+        '    <h3>' + (t('share.pick_variant') || 'Выбери дизайн') + '</h3>' +
+        '    <button class="share-modal-close" aria-label="close">\u2716</button>' +
+        '  </div>' +
+        '  <div class="share-variants">' +
+        '    <div class="share-variant" data-variant="A"><div class="share-variant-canvas"></div><div class="share-variant-label">' + (t('share.variant_a') || 'A — Состав') + '</div></div>' +
+        '    <div class="share-variant" data-variant="B"><div class="share-variant-canvas"></div><div class="share-variant-label">' + (t('share.variant_b') || 'B — MVP') + '</div></div>' +
+        '    <div class="share-variant" data-variant="C"><div class="share-variant-canvas"></div><div class="share-variant-label">' + (t('share.variant_c') || 'C — Stories') + '</div></div>' +
+        '  </div>' +
+        '</div>';
+    document.body.appendChild(overlay);
+    overlay.querySelector('.share-modal-close').addEventListener('click', function () {
+        overlay.remove();
+    });
+    overlay.addEventListener('click', function (e) {
+        if (e.target === overlay) overlay.remove();
+    });
+
+    // Render thumbnails (smaller canvases). Use the same draw functions
+    // — they're size-parameterized.
+    var thumbDims = { w: 320, h: 320 };
+    var thumbDimsTall = { w: 240, h: 426 };
+    var slots = overlay.querySelectorAll('.share-variant');
+    for (var i = 0; i < slots.length; i++) {
+        (function (slot) {
+            var v = slot.getAttribute('data-variant');
+            var dims = (v === 'C') ? thumbDimsTall : thumbDims;
+            var c = document.createElement('canvas');
+            c.width = dims.w;
+            c.height = dims.h;
+            var cx = c.getContext('2d');
+            var fn = (v === 'A') ? drawCardLineup : (v === 'B') ? drawCardMvp : drawCardStats;
+            fn(cx, data, dims.w, dims.h).then(function () {
+                slot.querySelector('.share-variant-canvas').appendChild(c);
+            }).catch(function () {});
+            slot.addEventListener('click', function () {
+                _renderAndShare(v, data);
+                overlay.remove();
+            });
+        })(slots[i]);
+    }
+}
+
+async function _renderAndShare(variant, data) {
+    toast(t('share.downloading'));
+    var canvas;
+    try {
+        canvas = await _renderShareCard(variant, data);
+    } catch (e) {
+        toast(t('common.error'));
+        return;
+    }
+    canvas.toBlob(function (blob) {
+        if (!blob) { toast(t('common.error')); return; }
+        var fileName = 'chelsea-' + variant.toLowerCase() + '.png';
+        if (navigator.share && navigator.canShare) {
+            var file = new File([blob], fileName, { type: 'image/png' });
+            var sd = { files: [file], title: 'Chelsea Voting' };
+            if (navigator.canShare(sd)) {
+                navigator.share(sd).then(function () { toast(t('share.card_ready')); })
+                                   .catch(function () { downloadBlob(blob); });
+                return;
+            }
+        }
+        downloadBlob(blob);
+    }, 'image/png');
+}

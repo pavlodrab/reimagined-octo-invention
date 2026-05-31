@@ -453,6 +453,10 @@ var TRANSLATIONS = {
         // Share card
         share: {
             generate_card: 'Создать карточку',
+            pick_variant: 'Выбери дизайн',
+            variant_a: 'A — Состав',
+            variant_b: 'B — MVP',
+            variant_c: 'C — Stories',
             share_card: 'Поделиться карточкой',
             downloading: 'Генерация...',
             card_ready: 'Карточка готова!'
@@ -979,8 +983,13 @@ var TRANSLATIONS = {
         },
 
         // Share card
+        // Share card
         share: {
             generate_card: 'Generate Card',
+            pick_variant: 'Pick a design',
+            variant_a: 'A — Lineup',
+            variant_b: 'B — MVP',
+            variant_c: 'C — Stories',
             share_card: 'Share Card',
             downloading: 'Generating...',
             card_ready: 'Card ready!'

@@ -2383,6 +2383,106 @@ def api_compare_users(uid1, uid2):
     })
 
 
+@app.get("/api/share/<poll_id>")
+def api_share_data(poll_id):
+    """Aggregate all data needed to render the share-card variants client-side.
+
+    Three canvas variants live in the mini-app (lineup / MVP cover / vertical
+    stats card). Each needs the same overlapping data — running three separate
+    fetches and joining client-side would be three extra round-trips on a slow
+    cellular connection. This endpoint hands the frontend everything in one
+    request: poll metadata, the lineup with player photos, the user's own
+    ratings merged with community average + rank per player, the user's
+    profile fields needed for branding, plus their XP and current streak.
+    """
+    poll = get_poll(poll_id)
+    if not poll:
+        return jsonify({"success": False, "error": "poll not found"}), 404
+    uid = get_current_user_id()
+    if not uid:
+        return jsonify({"success": False, "error": "unauthorized"}), 401
+
+    match_id = poll.get("match_id", "") or ""
+
+    # Pull the squad. ORDER BY puts starters first, then by jersey number so
+    # the frontend can do quick formation layout without re-sorting.
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT player_id, name, number, position, photo_url, is_starter "
+            "FROM players WHERE match_id = ? "
+            "ORDER BY is_starter DESC, COALESCE(number, 999) ASC, name ASC",
+            (match_id,),
+        ).fetchall()
+        players = [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+    # User's own per-player ratings for THIS poll (dict: player_id -> rating).
+    my_votes = get_user_vote(poll_id, uid) or {}
+
+    # Community average per player, already sorted desc by avg_rating in
+    # get_results — we use that order to compute community_rank without
+    # a second sort pass.
+    community = get_results(poll_id) or []
+    community_index = {r.get("player_id"): (i, r) for i, r in enumerate(community)}
+
+    enriched = []
+    for p in players:
+        idx_row = community_index.get(p.get("player_id"))
+        c_rank = (idx_row[0] + 1) if idx_row else None
+        c_avg = idx_row[1].get("avg_rating") if idx_row else None
+        c_votes = idx_row[1].get("vote_count") if idx_row else None
+        enriched.append({
+            "player_id": p.get("player_id"),
+            "name": p.get("name"),
+            "number": p.get("number"),
+            "position": p.get("position"),
+            "photo_url": p.get("photo_url"),
+            "is_starter": bool(p.get("is_starter", 0)),
+            "my_rating": my_votes.get(p.get("player_id")),
+            "community_avg": c_avg,
+            "community_vote_count": c_votes,
+            "community_rank": c_rank,
+        })
+
+    profile = get_profile(uid) or {}
+    xp = get_user_xp(uid)
+    streak = get_user_streak(uid)
+    total_voters = get_total_votes_for_poll(poll_id)
+
+    return jsonify({
+        "success": True,
+        "poll": {
+            "poll_id": poll.get("poll_id"),
+            "match_id": match_id,
+            "title": poll.get("title"),
+            "status": poll.get("status"),
+            "created_at": poll.get("created_at"),
+            "max_rating": int(poll.get("max_rating") or 10),
+        },
+        "lineup": enriched,
+        "my": {
+            "user_id": uid,
+            "first_name": profile.get("first_name") or "",
+            "last_name": profile.get("last_name") or "",
+            "username": profile.get("username") or "",
+            "telegram_photo_url": profile.get("telegram_photo_url") or "",
+            "custom_id": profile.get("custom_id") or "",
+            "auto_id": profile.get("auto_id") or "",
+            "total_votes": profile.get("total_votes") or 0,
+        },
+        "stats": {
+            "total_xp": xp.get("total_xp", 0),
+            "level": xp.get("level"),
+            "current_streak": streak.get("current_streak", 0),
+            "max_streak": streak.get("max_streak", 0),
+            "total_voters": total_voters,
+        },
+        "max_rating": int(poll.get("max_rating") or 10),
+    })
+
+
 @app.get("/api/results/<poll_id>/visualization")
 def api_results_visualization(poll_id):
     """Enhanced results with bar chart data, medals, and best/worst match stats."""
