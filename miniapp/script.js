@@ -1505,7 +1505,7 @@ async function renderPollResults(pollId) {
         // Share button
         html += '<div style="text-align:center;margin-top:12px;">';
         html += '<button class="share-btn" onclick="shareResults(\'' + pollId + '\')">' + t('social.share_results') + '</button>';
-        html += '<button class="share-card-btn" onclick="shareResultCard(\'' + pollId + '\')">&#x1f5bc;&#xfe0f; ' + t('share.generate_card') + '</button>';
+        html += '<button class="share-card-btn" onclick="openShareModal(\'' + pollId + '\')">&#x1f5bc;&#xfe0f; ' + t('social.share') + '</button>';
         html += '</div>';
 
         container.innerHTML = html;
@@ -1538,158 +1538,860 @@ async function shareResults(pollId) {
     } catch (e) { toast(t('common.error')); }
 }
 
-/* ═══ Result Card Generation (Canvas API) ═══ */
+/* ═══════════════════════════════════════════════════════════════
+   Share-to-Story  ── 3-variant card generator
+   ═══════════════════════════════════════════════════════════════
+   Pipeline:
+     openShareModal(pollId) → user picks A/B/C
+       → generateLineupCardA / generateMVPCardB / generateStatsCardC
+         → shareCanvas() (tg.shareToStory → navigator.share → download)
 
-async function generateResultCard(pollId) {
-    // Fetch results data
+   Designs:
+     A — Lineup, 1080×1350: pitch + formation + gold rating circles
+     B — MVP cover, 1080×1920: hero player, magazine-cover layout
+     C — Stats card, 1080×1920: top-3 podium + key stats for Stories
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Cache the visualization payload between repeated opens of the modal
+   for the same poll so picking a second variant doesn't refetch.       */
+var _shareCache = {};
+
+async function _loadCardData(pollId) {
+    if (_shareCache[pollId]) return _shareCache[pollId];
     var data = await api('/api/results/' + pollId + '/visualization');
-    if (!data.success || !data.results) { toast(t('common.error')); return null; }
-
-    var results = data.results;
+    if (!data || !data.success || !data.results) return null;
     var poll = data.poll || state.currentPoll || {};
+    // Merge in number/position/is_starter from state.players when the
+    // backend didn't supply them (older deploys / cached responses) and
+    // the poll happens to be the one the user is currently looking at.
+    if (state.currentPoll && poll.poll_id === state.currentPoll.poll_id && Array.isArray(state.players)) {
+        var byId = {};
+        state.players.forEach(function(p) { byId[p.player_id || p.id] = p; });
+        data.results.forEach(function(r) {
+            var p = byId[r.player_id];
+            if (p) {
+                if (r.number == null || r.number === '') r.number = p.number;
+                if (!r.position) r.position = p.position;
+                if (typeof r.is_starter !== 'boolean') r.is_starter = !!p.is_starter;
+                if (!r.photo_url) r.photo_url = p.photo_url;
+            }
+        });
+    }
+    _shareCache[pollId] = data;
+    return data;
+}
+
+/* Promise-wrapped Image() loader. Resolves with the loaded HTMLImageElement
+   on success, or null on error / network failure. We always set
+   crossOrigin='anonymous' BEFORE assigning src so the canvas isn't tainted
+   when the host serves CORS headers; if the host doesn't, the load itself
+   fails and we resolve null — caller draws a colored placeholder instead.   */
+function _loadImageSafe(url) {
+    return new Promise(function(resolve) {
+        if (!url) { resolve(null); return; }
+        var img = new Image();
+        img.crossOrigin = 'anonymous';
+        var done = false;
+        var finish = function(ok) {
+            if (done) return;
+            done = true;
+            resolve(ok ? img : null);
+        };
+        img.onload = function() { finish(true); };
+        img.onerror = function() { finish(false); };
+        // Hard timeout so a slow CDN doesn't block card generation forever.
+        setTimeout(function() { finish(false); }, 5000);
+        img.src = url;
+    });
+}
+
+/* roundRect polyfill — older Safari and the in-Telegram WebView on
+   some Android builds still ship a Canvas without it.                    */
+function _roundRect(ctx, x, y, w, h, r) {
+    if (typeof ctx.roundRect === 'function') {
+        ctx.beginPath();
+        ctx.roundRect(x, y, w, h, r);
+        return;
+    }
+    r = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+}
+
+/* Initials fallback for circular avatars — first letter of given name. */
+function _initialOf(name) {
+    if (!name) return '?';
+    var parts = String(name).trim().split(/\s+/);
+    return (parts[0][0] || '?').toUpperCase();
+}
+
+/* Draw an image clipped to a circle. If img is null, draw a Chelsea-blue
+   disk with the player initial — same visual language as the in-app
+   placeholder so the card looks intentional even when CORS denies us.    */
+function _drawCircularPhoto(ctx, img, cx, cy, radius, name) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.closePath();
+    ctx.clip();
+    if (img) {
+        // Cover-fit: scale the image so the smaller side fills the circle.
+        var iw = img.naturalWidth || img.width;
+        var ih = img.naturalHeight || img.height;
+        if (iw > 0 && ih > 0) {
+            var scale = Math.max((radius * 2) / iw, (radius * 2) / ih);
+            var dw = iw * scale, dh = ih * scale;
+            ctx.drawImage(img, cx - dw / 2, cy - dh / 2, dw, dh);
+        } else {
+            ctx.fillStyle = '#034694';
+            ctx.fillRect(cx - radius, cy - radius, radius * 2, radius * 2);
+        }
+    } else {
+        ctx.fillStyle = '#034694';
+        ctx.fillRect(cx - radius, cy - radius, radius * 2, radius * 2);
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold ' + Math.round(radius * 0.9) + 'px ' + (window.getComputedStyle(document.body).fontFamily || 'sans-serif');
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(_initialOf(name), cx, cy);
+    }
+    ctx.restore();
+}
+
+/* Gold rating "chip" — radial gradient disk with a 1-decimal number.    */
+function _drawRatingBadge(ctx, cx, cy, radius, value, fontFamily) {
+    var g = ctx.createRadialGradient(cx - radius / 3, cy - radius / 3, 1, cx, cy, radius);
+    g.addColorStop(0, '#f6d365');
+    g.addColorStop(0.55, '#DBA111');
+    g.addColorStop(1, '#a07509');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+    ctx.lineWidth = Math.max(2, radius * 0.06);
+    ctx.stroke();
+    ctx.fillStyle = '#0a1628';
+    ctx.font = 'bold ' + Math.round(radius * 0.9) + 'px ' + (fontFamily || 'sans-serif');
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    var label = (value == null || isNaN(value)) ? '–' : Number(value).toFixed(1);
+    ctx.fillText(label, cx, cy + radius * 0.04);
+}
+
+/* Truncate a player's display name to "F. Lastname" when it's too long
+   for a tight slot on the lineup card.                                   */
+function _shortName(name, maxChars) {
+    if (!name) return '';
+    if (name.length <= maxChars) return name;
+    var parts = name.trim().split(/\s+/);
+    if (parts.length >= 2) {
+        var short = parts[0][0] + '. ' + parts[parts.length - 1];
+        if (short.length <= maxChars) return short;
+        return short.slice(0, maxChars - 1) + '…';
+    }
+    return name.slice(0, maxChars - 1) + '…';
+}
+
+/* Pick a sensible football formation from the position counts of the
+   eleven starters. Returns an array of "lines" from defense → attack,
+   each line is { count, key }. We always seed a 1-keeper line first.    */
+function _pickFormation(starters) {
+    var def = 0, mid = 0, fwd = 0;
+    starters.forEach(function(p) {
+        var pos = String(p.position || '').toUpperCase();
+        if (pos.indexOf('GK') >= 0 || pos.indexOf('G') === 0) return;
+        if (pos.indexOf('D') === 0 || pos.indexOf('B') >= 0) def++;
+        else if (pos.indexOf('F') === 0 || pos.indexOf('W') >= 0 || pos.indexOf('S') >= 0) fwd++;
+        else mid++;
+    });
+    // Heuristic: if totals don't add up to 10 outfielders we fall back
+    // to 4-3-3 — Chelsea's most common shape.
+    if (def + mid + fwd !== 10) {
+        def = 4; mid = 3; fwd = 3;
+    }
+    return [
+        { key: 'GK',  count: 1   },
+        { key: 'DEF', count: def },
+        { key: 'MID', count: mid },
+        { key: 'FWD', count: fwd }
+    ];
+}
+
+/* ═══ Variant A — Lineup card (1080 × 1350) ═══ */
+async function generateLineupCardA(pollId) {
+    var data = await _loadCardData(pollId);
+    if (!data) return null;
+
+    var poll = data.poll || {};
+    var results = data.results || [];
     var totalVoters = data.total_voters || 0;
 
-    // Create canvas
-    var canvas = document.createElement('canvas');
-    canvas.width = 600;
-    canvas.height = 800;
-    var ctx = canvas.getContext('2d');
+    // Map ratings by player_id so we can look them up while iterating
+    // through the formation.
+    var byId = {};
+    results.forEach(function(r) { byId[r.player_id] = r; });
 
-    // Background gradient (Chelsea blue)
-    var grad = ctx.createLinearGradient(0, 0, 0, 800);
-    grad.addColorStop(0, '#022d5c');
-    grad.addColorStop(0.5, '#034694');
-    grad.addColorStop(1, '#0a1628');
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, 600, 800);
-
-    // Decorative lines
-    ctx.strokeStyle = 'rgba(219, 161, 17, 0.3)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(30, 80);
-    ctx.lineTo(570, 80);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(30, 720);
-    ctx.lineTo(570, 720);
-    ctx.stroke();
-
-    // Title
-    ctx.fillStyle = '#DBA111';
-    ctx.font = 'bold 28px -apple-system, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText(poll.title || 'Match Results', 300, 50);
-
-    // Subtitle
-    ctx.fillStyle = '#8899b0';
-    ctx.font = '16px -apple-system, sans-serif';
-    ctx.fillText('Chelsea Voting Bot - Player Ratings', 300, 110);
-
-    // Total voters
-    ctx.fillStyle = '#ffffff';
-    ctx.font = '14px -apple-system, sans-serif';
-    ctx.fillText(totalVoters + ' voters', 300, 135);
-
-    // Top 5 players
-    var top5 = results.slice(0, 5);
-    var startY = 180;
-    var rowHeight = 100;
-
-    for (var i = 0; i < top5.length; i++) {
-        var r = top5[i];
-        var y = startY + i * rowHeight;
-        var playerName = r.player_name || r.name || r.player_id;
-
-        // Medal/rank circle
-        var circleColors = ['#DBA111', '#c0c0c0', '#cd7f32', '#034694', '#034694'];
-        ctx.beginPath();
-        ctx.arc(60, y + 30, 22, 0, Math.PI * 2);
-        ctx.fillStyle = circleColors[i];
-        ctx.fill();
-        ctx.fillStyle = i < 3 ? '#000' : '#fff';
-        ctx.font = 'bold 18px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText(String(i + 1), 60, y + 36);
-
-        // Player name
-        ctx.textAlign = 'left';
-        ctx.fillStyle = '#ffffff';
-        ctx.font = 'bold 20px -apple-system, sans-serif';
-        ctx.fillText(playerName, 100, y + 25);
-
-        // Rating bar
-        var maxWidth = 350;
-        var barWidth = (r.avg_rating / (poll.max_rating || 15)) * maxWidth;
-        barWidth = Math.min(maxWidth, Math.max(20, barWidth));
-
-        var barGrad = ctx.createLinearGradient(100, y + 40, 100 + barWidth, y + 40);
-        barGrad.addColorStop(0, '#034694');
-        barGrad.addColorStop(1, '#DBA111');
-        ctx.fillStyle = barGrad;
-        if (ctx.roundRect) {
-            ctx.beginPath();
-            ctx.roundRect(100, y + 38, barWidth, 16, 8);
-            ctx.fill();
-        } else {
-            ctx.fillRect(100, y + 38, barWidth, 16);
-        }
-
-        // Rating value
-        ctx.fillStyle = '#DBA111';
-        ctx.font = 'bold 22px sans-serif';
-        ctx.textAlign = 'right';
-        ctx.fillText(r.avg_rating != null ? r.avg_rating.toFixed(1) : '-', 560, y + 36);
-
-        ctx.textAlign = 'left';
+    // Starters set: prefer is_starter flag, else fall back to top-11 by
+    // rating so even legacy polls render something on the pitch.
+    var starters = results.filter(function(r) { return r.is_starter; });
+    if (starters.length < 11) {
+        starters = results.slice().sort(function(a, b) {
+            return (b.avg_rating || 0) - (a.avg_rating || 0);
+        }).slice(0, 11);
+    } else {
+        starters = starters.slice(0, 11);
     }
 
-    // Footer
+    var W = 1080, H = 1350;
+    var canvas = document.createElement('canvas');
+    canvas.width = W; canvas.height = H;
+    var ctx = canvas.getContext('2d');
+    var fontDisp = '"Russo One", "Oswald", "Inter", -apple-system, sans-serif';
+    var fontBody = '"Inter", -apple-system, sans-serif';
+
+    // ── Background frame (Chelsea blue) ──
+    var bgGrad = ctx.createLinearGradient(0, 0, 0, H);
+    bgGrad.addColorStop(0, '#022d5c');
+    bgGrad.addColorStop(1, '#0a1628');
+    ctx.fillStyle = bgGrad;
+    ctx.fillRect(0, 0, W, H);
+
+    // ── Header strip ──
+    ctx.fillStyle = '#DBA111';
+    ctx.font = 'bold 36px ' + fontDisp;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText(t('share.card_match_ratings'), 60, 50);
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 44px ' + fontDisp;
+    var title = poll.title || '—';
+    // Hard-cap the title length so it always fits.
+    if (title.length > 38) title = title.slice(0, 36) + '…';
+    ctx.fillText(title, 60, 92);
+
     ctx.fillStyle = '#8899b0';
-    ctx.font = '12px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText('Generated by Chelsea Voting Bot', 300, 760);
-    ctx.fillText(new Date().toLocaleDateString(), 300, 780);
+    ctx.font = '24px ' + fontBody;
+    ctx.fillText(totalVoters + ' ' + t('share.card_voters'), 60, 150);
+
+    // ── Pitch panel ──
+    var pitchX = 40, pitchY = 200, pitchW = W - 80, pitchH = 1000;
+    var pitchGrad = ctx.createLinearGradient(0, pitchY, 0, pitchY + pitchH);
+    pitchGrad.addColorStop(0, '#0e6b2c');
+    pitchGrad.addColorStop(1, '#083d18');
+    ctx.fillStyle = pitchGrad;
+    _roundRect(ctx, pitchX, pitchY, pitchW, pitchH, 28);
+    ctx.fill();
+
+    // Pitch lines
+    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+    ctx.lineWidth = 3;
+    _roundRect(ctx, pitchX + 16, pitchY + 16, pitchW - 32, pitchH - 32, 18);
+    ctx.stroke();
+    // Center line
+    ctx.beginPath();
+    ctx.moveTo(pitchX + 16, pitchY + pitchH / 2);
+    ctx.lineTo(pitchX + pitchW - 16, pitchY + pitchH / 2);
+    ctx.stroke();
+    // Center circle
+    ctx.beginPath();
+    ctx.arc(pitchX + pitchW / 2, pitchY + pitchH / 2, 90, 0, Math.PI * 2);
+    ctx.stroke();
+    // Penalty boxes (top + bottom)
+    var boxW = 360, boxH = 130;
+    ctx.strokeRect(pitchX + (pitchW - boxW) / 2, pitchY + 16, boxW, boxH);
+    ctx.strokeRect(pitchX + (pitchW - boxW) / 2, pitchY + pitchH - 16 - boxH, boxW, boxH);
+
+    // ── Formation layout ──
+    // GK at the bottom (closest to viewer), forwards at the top.
+    var formation = _pickFormation(starters);
+
+    // Sort starters into bins by position so we can place them without
+    // accidentally stuffing two forwards on the GK row.
+    var bins = { GK: [], DEF: [], MID: [], FWD: [] };
+    starters.forEach(function(p) {
+        var pos = String(p.position || '').toUpperCase();
+        if (pos.indexOf('GK') >= 0 || pos.indexOf('G') === 0) bins.GK.push(p);
+        else if (pos.indexOf('D') === 0 || pos.indexOf('B') >= 0) bins.DEF.push(p);
+        else if (pos.indexOf('F') === 0 || pos.indexOf('W') >= 0 || pos.indexOf('S') >= 0) bins.FWD.push(p);
+        else bins.MID.push(p);
+    });
+    // If a bin overflowed (e.g., 5 defenders but formation says 4), the
+    // extras spill into the adjacent line — better than dropping players.
+    var queue = [];
+    formation.forEach(function(line) {
+        var bin = bins[line.key] || [];
+        for (var i = 0; i < line.count; i++) {
+            if (bin.length) queue.push({ line: line.key, p: bin.shift() });
+            else queue.push({ line: line.key, p: null });
+        }
+    });
+    // Drain any leftovers (shouldn't normally happen) onto MID.
+    ['DEF','MID','FWD'].forEach(function(k) {
+        bins[k].forEach(function(p) { queue.push({ line: 'MID', p: p }); });
+    });
+
+    // Y bands inside the pitch — top of pitch is FWD, bottom is GK.
+    var yBands = {
+        FWD: pitchY + pitchH * 0.18,
+        MID: pitchY + pitchH * 0.42,
+        DEF: pitchY + pitchH * 0.66,
+        GK:  pitchY + pitchH * 0.88
+    };
+
+    // Pre-load all photos in parallel (cap fetches at ~12 anyway).
+    var photoPromises = queue.map(function(item) {
+        return item.p ? _loadImageSafe(item.p.photo_url) : Promise.resolve(null);
+    });
+    var photos = await Promise.all(photoPromises);
+
+    // Helper: draw one player slot.
+    function drawSlot(item, photo, cx, cy) {
+        var p = item.p;
+        var radius = 64;
+        // Soft shadow under the avatar.
+        ctx.save();
+        ctx.shadowColor = 'rgba(0,0,0,0.45)';
+        ctx.shadowBlur = 18;
+        ctx.shadowOffsetY = 6;
+        // Gold ring.
+        ctx.fillStyle = '#DBA111';
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius + 5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+        _drawCircularPhoto(ctx, photo, cx, cy, radius, p ? p.player_name : '?');
+
+        // Jersey-number badge bottom-left of the photo.
+        if (p && p.number) {
+            ctx.fillStyle = '#0a1628';
+            ctx.beginPath();
+            ctx.arc(cx - radius + 6, cy + radius - 4, 22, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#DBA111';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+            ctx.fillStyle = '#DBA111';
+            ctx.font = 'bold 22px ' + fontDisp;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(String(p.number), cx - radius + 6, cy + radius - 4);
+        }
+
+        // Rating badge top-right.
+        if (p) {
+            var r = byId[p.player_id];
+            var ratingVal = r ? r.avg_rating : null;
+            _drawRatingBadge(ctx, cx + radius - 4, cy - radius + 4, 28, ratingVal, fontDisp);
+        }
+
+        // Name pill below.
+        if (p) {
+            var nm = _shortName(p.player_name, 14);
+            ctx.font = 'bold 26px ' + fontBody;
+            var tw = ctx.measureText(nm).width;
+            var pillW = Math.max(tw + 28, 130);
+            var pillH = 38;
+            var pillX = cx - pillW / 2;
+            var pillY = cy + radius + 14;
+            ctx.fillStyle = 'rgba(10,22,40,0.85)';
+            _roundRect(ctx, pillX, pillY, pillW, pillH, 19);
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(219,161,17,0.5)';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            ctx.fillStyle = '#ffffff';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(nm, cx, pillY + pillH / 2);
+        }
+    }
+
+    // Walk the formation lines and place slots evenly across the width.
+    var idx = 0;
+    formation.forEach(function(line) {
+        var n = line.count;
+        if (n === 0) return;
+        var bandY = yBands[line.key];
+        var marginX = 110;
+        var avail = pitchW - marginX * 2;
+        // Center each slot on its share of the width, even for 1-player rows.
+        for (var i = 0; i < n; i++) {
+            var cx = pitchX + marginX + (avail * (i + 0.5) / n);
+            var item = queue[idx];
+            var photo = photos[idx];
+            idx++;
+            if (item) drawSlot(item, photo, cx, bandY);
+        }
+    });
+
+    // ── Footer brand strip ──
+    ctx.fillStyle = '#DBA111';
+    ctx.font = 'bold 26px ' + fontDisp;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText(t('share.card_brand'), 60, H - 80);
+    ctx.fillStyle = '#8899b0';
+    ctx.font = '22px ' + fontBody;
+    ctx.textAlign = 'right';
+    ctx.fillText(new Date().toLocaleDateString(), W - 60, H - 76);
 
     return canvas;
 }
 
-async function shareResultCard(pollId) {
-    toast(t('share.downloading'));
+/* ═══ Variant B — MVP cover (1080 × 1920) ═══ */
+async function generateMVPCardB(pollId) {
+    var data = await _loadCardData(pollId);
+    if (!data || !data.results.length) return null;
+
+    var poll = data.poll || {};
+    var totalVoters = data.total_voters || 0;
+    var mvp = data.results[0]; // results are pre-sorted desc by avg_rating
+    var W = 1080, H = 1920;
+
+    var canvas = document.createElement('canvas');
+    canvas.width = W; canvas.height = H;
+    var ctx = canvas.getContext('2d');
+    var fontDisp = '"Russo One", "Oswald", "Inter", -apple-system, sans-serif';
+    var fontBody = '"Inter", -apple-system, sans-serif';
+
+    // ── Dramatic gradient backdrop ──
+    var bgGrad = ctx.createLinearGradient(0, 0, W, H);
+    bgGrad.addColorStop(0, '#0a1628');
+    bgGrad.addColorStop(0.5, '#022d5c');
+    bgGrad.addColorStop(1, '#0a1628');
+    ctx.fillStyle = bgGrad;
+    ctx.fillRect(0, 0, W, H);
+
+    // Diagonal Chelsea-blue slashes for that "magazine" feel.
+    ctx.save();
+    ctx.translate(W / 2, H / 2);
+    ctx.rotate(-Math.PI / 7);
+    ctx.translate(-W / 2, -H / 2);
+    for (var i = -3; i < 8; i++) {
+        ctx.fillStyle = i % 2 === 0 ? 'rgba(3,70,148,0.22)' : 'rgba(3,70,148,0.06)';
+        ctx.fillRect(-200 + i * 220, -300, 110, H + 600);
+    }
+    ctx.restore();
+
+    // Top "MVP" label
+    ctx.fillStyle = '#DBA111';
+    ctx.font = 'bold 96px ' + fontDisp;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText(t('share.card_mvp'), W / 2, 150);
+
+    // Decorative subtitle line under MVP
+    ctx.strokeStyle = '#DBA111';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(W / 2 - 120, 280);
+    ctx.lineTo(W / 2 + 120, 280);
+    ctx.stroke();
+
+    ctx.fillStyle = '#8899b0';
+    ctx.font = '32px ' + fontBody;
+    ctx.fillText(poll.title || '—', W / 2, 310);
+
+    // Hero photo — large gold-ringed circle
+    var photo = await _loadImageSafe(mvp.photo_url);
+    var cx = W / 2, cy = 820, radius = 360;
+
+    // Outer glow
+    ctx.save();
+    ctx.shadowColor = 'rgba(219,161,17,0.55)';
+    ctx.shadowBlur = 80;
+    ctx.fillStyle = '#DBA111';
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius + 20, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    // Gold ring
+    ctx.fillStyle = '#DBA111';
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius + 10, 0, Math.PI * 2);
+    ctx.fill();
+    _drawCircularPhoto(ctx, photo, cx, cy, radius, mvp.player_name);
+
+    // Big rating chip overlapping the photo (bottom-right)
+    _drawRatingBadge(ctx, cx + radius - 30, cy + radius - 30, 110, mvp.avg_rating, fontDisp);
+
+    // Name (uppercase, dramatic)
+    ctx.fillStyle = '#ffffff';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    var name = String(mvp.player_name || mvp.player_id || '').toUpperCase();
+    // Auto-shrink the headline so multi-syllable Russian/UA names still fit.
+    var nameSize = 130;
+    ctx.font = 'bold ' + nameSize + 'px ' + fontDisp;
+    while (ctx.measureText(name).width > W - 100 && nameSize > 60) {
+        nameSize -= 6;
+        ctx.font = 'bold ' + nameSize + 'px ' + fontDisp;
+    }
+    ctx.fillText(name, W / 2, 1280);
+
+    // Position / number row
+    if (mvp.number || mvp.position) {
+        ctx.fillStyle = '#DBA111';
+        ctx.font = 'bold 40px ' + fontDisp;
+        var meta = [];
+        if (mvp.number) meta.push('#' + mvp.number);
+        if (mvp.position) meta.push(String(mvp.position).toUpperCase());
+        ctx.fillText(meta.join(' · '), W / 2, 1280 + nameSize + 20);
+    }
+
+    // Stats strip near the bottom
+    var stripY = 1620;
+    ctx.fillStyle = 'rgba(255,255,255,0.06)';
+    _roundRect(ctx, 80, stripY, W - 160, 140, 22);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(219,161,17,0.4)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 64px ' + fontDisp;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(Number(mvp.avg_rating || 0).toFixed(1), W * 0.28, stripY + 70);
+    ctx.fillText(String(totalVoters), W * 0.72, stripY + 70);
+
+    ctx.fillStyle = '#8899b0';
+    ctx.font = '22px ' + fontBody;
+    ctx.fillText(t('share.card_avg_rating'), W * 0.28, stripY + 115);
+    ctx.fillText(t('share.card_voters'), W * 0.72, stripY + 115);
+
+    // Footer brand
+    ctx.fillStyle = '#DBA111';
+    ctx.font = 'bold 30px ' + fontDisp;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText(t('share.card_brand'), W / 2, H - 90);
+
+    return canvas;
+}
+
+/* ═══ Variant C — Stats card (1080 × 1920) ═══ */
+async function generateStatsCardC(pollId) {
+    var data = await _loadCardData(pollId);
+    if (!data || !data.results.length) return null;
+
+    var poll = data.poll || {};
+    var results = data.results;
+    var totalVoters = data.total_voters || 0;
+    var top3 = results.slice(0, 3);
+    var W = 1080, H = 1920;
+
+    var canvas = document.createElement('canvas');
+    canvas.width = W; canvas.height = H;
+    var ctx = canvas.getContext('2d');
+    var fontDisp = '"Russo One", "Oswald", "Inter", -apple-system, sans-serif';
+    var fontBody = '"Inter", -apple-system, sans-serif';
+
+    // Background
+    var bgGrad = ctx.createLinearGradient(0, 0, 0, H);
+    bgGrad.addColorStop(0, '#022d5c');
+    bgGrad.addColorStop(0.5, '#034694');
+    bgGrad.addColorStop(1, '#0a1628');
+    ctx.fillStyle = bgGrad;
+    ctx.fillRect(0, 0, W, H);
+
+    // Header
+    ctx.fillStyle = '#DBA111';
+    ctx.font = 'bold 80px ' + fontDisp;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText(t('share.card_top3'), W / 2, 160);
+
+    ctx.strokeStyle = 'rgba(219,161,17,0.6)';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(W / 2 - 100, 270);
+    ctx.lineTo(W / 2 + 100, 270);
+    ctx.stroke();
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 44px ' + fontDisp;
+    var title = poll.title || '—';
+    if (title.length > 30) title = title.slice(0, 28) + '…';
+    ctx.fillText(title, W / 2, 300);
+
+    // Pre-load top-3 photos
+    var photos = await Promise.all(top3.map(function(p) {
+        return _loadImageSafe(p.photo_url);
+    }));
+
+    // Podium positions (silver, gold, bronze) — gold raised in center.
+    var podium = [
+        // [index in top3, x-center, base y, photo radius, podium height, medal color]
+        { idx: 1, cx: W * 0.22, baseY: 1180, r: 130, h: 230, color: '#c0c0c0', label: '2' },
+        { idx: 0, cx: W * 0.50, baseY: 1080, r: 160, h: 330, color: '#DBA111', label: '1' },
+        { idx: 2, cx: W * 0.78, baseY: 1230, r: 110, h: 180, color: '#cd7f32', label: '3' }
+    ];
+
+    podium.forEach(function(slot) {
+        var p = top3[slot.idx];
+        if (!p) return;
+
+        // Podium block
+        var blockW = 260, blockX = slot.cx - blockW / 2, blockY = slot.baseY;
+        var blockGrad = ctx.createLinearGradient(blockX, blockY, blockX, blockY + slot.h);
+        blockGrad.addColorStop(0, slot.color);
+        blockGrad.addColorStop(1, 'rgba(0,0,0,0.4)');
+        ctx.fillStyle = blockGrad;
+        _roundRect(ctx, blockX, blockY, blockW, slot.h, 16);
+        ctx.fill();
+        // Big rank number on the block
+        ctx.fillStyle = 'rgba(0,0,0,0.45)';
+        ctx.font = 'bold 140px ' + fontDisp;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(slot.label, slot.cx, blockY + slot.h / 2 + 10);
+
+        // Photo above the block
+        var photoCY = blockY - slot.r - 10;
+        ctx.fillStyle = slot.color;
+        ctx.beginPath();
+        ctx.arc(slot.cx, photoCY, slot.r + 8, 0, Math.PI * 2);
+        ctx.fill();
+        _drawCircularPhoto(ctx, photos[slot.idx], slot.cx, photoCY, slot.r, p.player_name);
+
+        // Rating chip on the photo
+        _drawRatingBadge(ctx, slot.cx + slot.r - 10, photoCY + slot.r - 10, slot.r * 0.36, p.avg_rating, fontDisp);
+
+        // Name below the block
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 30px ' + fontBody;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.fillText(_shortName(p.player_name, 14), slot.cx, blockY + slot.h + 16);
+    });
+
+    // ── Stats grid ──
+    var avgRating = 0, count = 0;
+    results.forEach(function(r) {
+        if (typeof r.avg_rating === 'number') { avgRating += r.avg_rating; count++; }
+    });
+    avgRating = count ? avgRating / count : 0;
+
+    var statsY = 1640;
+    var stats = [
+        { label: t('share.card_voters'), value: String(totalVoters) },
+        { label: t('share.card_avg_rating'), value: avgRating.toFixed(2) }
+    ];
+    var cardW = (W - 60 * 2 - 30) / 2;
+    stats.forEach(function(s, i) {
+        var x = 60 + i * (cardW + 30);
+        ctx.fillStyle = 'rgba(255,255,255,0.08)';
+        _roundRect(ctx, x, statsY, cardW, 160, 18);
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(219,161,17,0.35)';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        ctx.fillStyle = '#DBA111';
+        ctx.font = 'bold 64px ' + fontDisp;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(s.value, x + cardW / 2, statsY + 60);
+
+        ctx.fillStyle = '#8899b0';
+        ctx.font = '24px ' + fontBody;
+        ctx.fillText(s.label, x + cardW / 2, statsY + 120);
+    });
+
+    // Footer brand
+    ctx.fillStyle = '#DBA111';
+    ctx.font = 'bold 30px ' + fontDisp;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText(t('share.card_brand'), W / 2, H - 90);
+
+    return canvas;
+}
+
+/* ═══ Modal: open / close / variant tiles ═══ */
+
+function openShareModal(pollId) {
+    var modal = document.getElementById('share-modal');
+    if (!modal) return;
+    var titleEl = document.getElementById('share-modal-title');
+    if (titleEl) titleEl.textContent = t('share.choose_variant');
+
+    var container = document.getElementById('share-modal-variants');
+    container.innerHTML = '';
+
+    var variants = [
+        {
+            id: 'A',
+            title: t('share.variant_a_title'),
+            desc:  t('share.variant_a_desc'),
+            preview: _previewSvgA(),
+            run: generateLineupCardA,
+            filename: 'chelsea-lineup'
+        },
+        {
+            id: 'B',
+            title: t('share.variant_b_title'),
+            desc:  t('share.variant_b_desc'),
+            preview: _previewSvgB(),
+            run: generateMVPCardB,
+            filename: 'chelsea-mvp'
+        },
+        {
+            id: 'C',
+            title: t('share.variant_c_title'),
+            desc:  t('share.variant_c_desc'),
+            preview: _previewSvgC(),
+            run: generateStatsCardC,
+            filename: 'chelsea-stats'
+        }
+    ];
+
+    variants.forEach(function(v) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'share-variant-card';
+        btn.setAttribute('aria-label', v.title);
+        btn.innerHTML =
+            '<div class="share-variant-preview">' + v.preview + '</div>' +
+            '<div class="share-variant-text">' +
+                '<div class="share-variant-title">' + escapeHtml(v.title) + '</div>' +
+                '<div class="share-variant-desc">' + escapeHtml(v.desc) + '</div>' +
+            '</div>';
+        btn.addEventListener('click', async function() {
+            // Disable every tile while we generate to prevent double-clicks.
+            container.querySelectorAll('.share-variant-card').forEach(function(b) { b.setAttribute('disabled', ''); });
+            toast(t('share.generating'));
+            try {
+                var canvas = await v.run(pollId);
+                if (!canvas) {
+                    toast(t('share.no_data'));
+                    container.querySelectorAll('.share-variant-card').forEach(function(b) { b.removeAttribute('disabled'); });
+                    return;
+                }
+                closeShareModal();
+                shareCanvas(canvas, v.filename + '.png');
+            } catch (e) {
+                console.error('share card generation failed', e);
+                toast(t('common.error'));
+                container.querySelectorAll('.share-variant-card').forEach(function(b) { b.removeAttribute('disabled'); });
+            }
+        });
+        container.appendChild(btn);
+    });
+
+    modal.style.display = 'flex';
+    // Lock background scroll while the modal is up.
+    document.body.style.overflow = 'hidden';
+}
+
+function closeShareModal() {
+    var modal = document.getElementById('share-modal');
+    if (!modal) return;
+    modal.style.display = 'none';
+    document.body.style.overflow = '';
+}
+
+/* Tiny inline SVGs used as the modal-tile previews. We could have used
+   <img> with prebuilt PNGs, but inline SVG keeps the bundle one fewer
+   request and lets the previews inherit the brand palette via fill.    */
+function _previewSvgA() {
+    return '<svg viewBox="0 0 80 100" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
+        '<rect x="4" y="6" width="72" height="88" rx="6" fill="#0e6b2c"/>' +
+        '<rect x="8" y="10" width="64" height="80" rx="4" fill="none" stroke="rgba(255,255,255,0.3)" stroke-width="1"/>' +
+        '<line x1="8" y1="50" x2="72" y2="50" stroke="rgba(255,255,255,0.3)"/>' +
+        '<circle cx="20" cy="22" r="4" fill="#DBA111"/><circle cx="40" cy="22" r="4" fill="#DBA111"/><circle cx="60" cy="22" r="4" fill="#DBA111"/>' +
+        '<circle cx="16" cy="42" r="4" fill="#DBA111"/><circle cx="32" cy="42" r="4" fill="#DBA111"/><circle cx="48" cy="42" r="4" fill="#DBA111"/><circle cx="64" cy="42" r="4" fill="#DBA111"/>' +
+        '<circle cx="16" cy="68" r="4" fill="#DBA111"/><circle cx="32" cy="68" r="4" fill="#DBA111"/><circle cx="48" cy="68" r="4" fill="#DBA111"/><circle cx="64" cy="68" r="4" fill="#DBA111"/>' +
+        '<circle cx="40" cy="86" r="4" fill="#DBA111"/>' +
+        '</svg>';
+}
+function _previewSvgB() {
+    return '<svg viewBox="0 0 80 100" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
+        '<defs><linearGradient id="bgB" x1="0" x2="1" y1="0" y2="1"><stop offset="0" stop-color="#022d5c"/><stop offset="1" stop-color="#0a1628"/></linearGradient></defs>' +
+        '<rect x="4" y="6" width="72" height="88" rx="6" fill="url(#bgB)"/>' +
+        '<text x="40" y="22" text-anchor="middle" font-size="10" font-weight="700" fill="#DBA111" font-family="sans-serif">MVP</text>' +
+        '<circle cx="40" cy="50" r="20" fill="#DBA111"/>' +
+        '<circle cx="40" cy="50" r="17" fill="#0563c1"/>' +
+        '<rect x="14" y="76" width="52" height="6" rx="2" fill="#fff"/>' +
+        '<rect x="22" y="86" width="36" height="4" rx="1" fill="rgba(255,255,255,0.5)"/>' +
+        '</svg>';
+}
+function _previewSvgC() {
+    return '<svg viewBox="0 0 80 100" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
+        '<rect x="20" y="6" width="40" height="88" rx="6" fill="#022d5c"/>' +
+        '<text x="40" y="20" text-anchor="middle" font-size="7" font-weight="700" fill="#DBA111" font-family="sans-serif">TOP 3</text>' +
+        '<circle cx="40" cy="38" r="9" fill="#DBA111"/>' +
+        '<circle cx="28" cy="46" r="6" fill="#c0c0c0"/>' +
+        '<circle cx="52" cy="46" r="6" fill="#cd7f32"/>' +
+        '<rect x="24" y="62" width="32" height="14" rx="2" fill="rgba(255,255,255,0.12)"/>' +
+        '<rect x="24" y="80" width="32" height="8" rx="2" fill="rgba(255,255,255,0.08)"/>' +
+        '</svg>';
+}
+
+/* ═══ Unified share pipeline ═══
+   Telegram's WebApp.shareToStory expects a publicly-reachable media URL,
+   not a Blob — so we can only call it when an external uploader is in
+   place. When that endpoint exists (window.UPLOAD_SHARE_IMAGE_URL is
+   defined and shareToStory is available), we upload first and pass the
+   returned URL. Otherwise we fall back to the platform Web Share API
+   (which on iOS/Android Telegram surfaces "Add to Story" in the system
+   share sheet) and finally to a plain PNG download.                    */
+async function shareCanvas(canvas, filename) {
+    var blob = await new Promise(function(resolve) {
+        canvas.toBlob(function(b) { resolve(b); }, 'image/png', 0.95);
+    });
+    if (!blob) { toast(t('common.error')); return; }
+
+    // 1) Telegram-native shareToStory (only viable with a public URL).
     try {
-        var canvas = await generateResultCard(pollId);
-        if (!canvas) return;
-
-        canvas.toBlob(function(blob) {
-            if (!blob) { toast(t('common.error')); return; }
-
-            // Try Web Share API first
-            if (navigator.share && navigator.canShare) {
-                var file = new File([blob], 'chelsea-results.png', { type: 'image/png' });
-                var shareData = { files: [file], title: 'Chelsea Match Results' };
-                if (navigator.canShare(shareData)) {
-                    navigator.share(shareData).then(function() {
-                        toast(t('share.card_ready'));
-                    }).catch(function() {
-                        downloadBlob(blob);
-                    });
+        if (tg && typeof tg.shareToStory === 'function' && typeof window.UPLOAD_SHARE_IMAGE_URL === 'string') {
+            var fd = new FormData();
+            fd.append('image', blob, filename);
+            var resp = await fetch(window.UPLOAD_SHARE_IMAGE_URL, { method: 'POST', body: fd });
+            if (resp.ok) {
+                var json = await resp.json();
+                if (json && json.url) {
+                    tg.shareToStory(json.url, { text: t('share.card_brand') });
+                    toast(t('share.card_ready'));
                     return;
                 }
             }
+        }
+    } catch (e) { /* fall through */ }
 
-            // Fallback: download
-            downloadBlob(blob);
-        }, 'image/png');
+    // 2) Web Share API with files — Telegram in-app browser supports this.
+    try {
+        if (navigator.share && typeof File !== 'undefined') {
+            var file = new File([blob], filename, { type: 'image/png' });
+            var shareData = { files: [file], title: t('share.card_brand') };
+            if (!navigator.canShare || navigator.canShare(shareData)) {
+                await navigator.share(shareData);
+                toast(t('share.card_ready'));
+                return;
+            }
+        }
     } catch (e) {
-        toast(t('common.error'));
+        // User cancelled or browser refused → fall through to download.
+        if (e && e.name === 'AbortError') return;
     }
-}
 
-function downloadBlob(blob) {
+    // 3) Last-resort: download the PNG so the user can post it manually.
     var url = URL.createObjectURL(blob);
     var a = document.createElement('a');
     a.href = url;
-    a.download = 'chelsea-results.png';
+    a.download = filename;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);

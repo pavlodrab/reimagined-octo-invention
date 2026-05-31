@@ -455,7 +455,25 @@ var TRANSLATIONS = {
             generate_card: 'Создать карточку',
             share_card: 'Поделиться карточкой',
             downloading: 'Генерация...',
-            card_ready: 'Карточка готова!'
+            card_ready: 'Карточка готова!',
+            // Variant picker
+            choose_variant: 'Выберите вариант',
+            variant_a_title: 'Состав',
+            variant_a_desc: 'Формация + все игроки + оценки',
+            variant_b_title: 'MVP',
+            variant_b_desc: 'Лучший игрок матча — обложка',
+            variant_c_title: 'Stats 9:16',
+            variant_c_desc: 'Топ-3 + статы под Stories',
+            generating: 'Рисуем картинку…',
+            no_data: 'Нет данных для карточки',
+            cancel: 'Отмена',
+            // Card body strings (rendered inside canvas)
+            card_mvp: 'MVP',
+            card_match_ratings: 'ОЦЕНКИ МАТЧА',
+            card_top3: 'ТОП-3',
+            card_voters: 'голосов',
+            card_avg_rating: 'средний балл',
+            card_brand: 'Chelsea Voting Bot'
         },
         live: {
             voters_now: 'уже проголосовали',
@@ -983,7 +1001,25 @@ var TRANSLATIONS = {
             generate_card: 'Generate Card',
             share_card: 'Share Card',
             downloading: 'Generating...',
-            card_ready: 'Card ready!'
+            card_ready: 'Card ready!',
+            // Variant picker
+            choose_variant: 'Choose a layout',
+            variant_a_title: 'Lineup',
+            variant_a_desc: 'Formation + all players + ratings',
+            variant_b_title: 'MVP',
+            variant_b_desc: 'Best player magazine cover',
+            variant_c_title: 'Stats 9:16',
+            variant_c_desc: 'Top-3 + stats for Stories',
+            generating: 'Drawing image…',
+            no_data: 'No data for the card',
+            cancel: 'Cancel',
+            // Card body strings (rendered inside canvas)
+            card_mvp: 'MVP',
+            card_match_ratings: 'MATCH RATINGS',
+            card_top3: 'TOP 3',
+            card_voters: 'votes',
+            card_avg_rating: 'avg rating',
+            card_brand: 'Chelsea Voting Bot'
         },
         live: {
             voters_now: 'voted already',

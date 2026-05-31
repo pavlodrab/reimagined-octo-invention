@@ -2397,11 +2397,17 @@ def api_results_visualization(poll_id):
     try:
         for i, r in enumerate(results):
             player_row = conn.execute(
-                'SELECT name, photo_url FROM players WHERE player_id = ? AND match_id = ?',
+                'SELECT name, photo_url, number, position, is_starter FROM players WHERE player_id = ? AND match_id = ?',
                 (r['player_id'], poll.get('match_id', ''))
             ).fetchone()
             r['player_name'] = player_row['name'] if player_row else r['player_id']
             r['photo_url'] = player_row['photo_url'] if player_row else ''
+            # Extra fields used by the share-to-story Lineup card so it can
+            # render the correct formation even for past polls (where the
+            # client doesn't already have state.players loaded).
+            r['number'] = player_row['number'] if player_row else ''
+            r['position'] = player_row['position'] if player_row else ''
+            r['is_starter'] = bool(player_row['is_starter']) if player_row else False
             if i == 0:
                 r['medal'] = 'gold'
             elif i == 1:
