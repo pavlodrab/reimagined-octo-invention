@@ -39,6 +39,9 @@ def _set_test_env(tmp_db_dir: Path) -> None:
     # High global default — individual per-route limits still apply
     os.environ["RATE_LIMIT_DEFAULT_PER_MINUTE"] = "10000 per minute"
     os.environ["RATE_LIMIT_DEFAULT_PER_HOUR"] = "1000000 per hour"
+    # Disable the burst-block window during tests; the dedicated
+    # test_burst_block.py overrides this back to a small value.
+    os.environ["BURST_MAX_REQUESTS"] = "100000"
 
 
 def _reload_modules() -> None:
