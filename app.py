@@ -1,7 +1,7 @@
 """
 app.py  —  Flask backend for Chelsea Voting Mini App
 """
-import os, json, time, uuid, hashlib, hmac, html, atexit, threading, queue, math
+import os, json, time, uuid, hashlib, hmac, html, atexit, threading, queue, math, re
 from urllib.parse import parse_qs
 
 from flask import Flask, request, jsonify, send_from_directory, abort, g, has_request_context
@@ -2497,11 +2497,17 @@ def api_results_visualization(poll_id):
     try:
         for i, r in enumerate(results):
             player_row = conn.execute(
-                'SELECT name, photo_url FROM players WHERE player_id = ? AND match_id = ?',
+                'SELECT name, photo_url, number, position, is_starter FROM players WHERE player_id = ? AND match_id = ?',
                 (r['player_id'], poll.get('match_id', ''))
             ).fetchone()
             r['player_name'] = player_row['name'] if player_row else r['player_id']
             r['photo_url'] = player_row['photo_url'] if player_row else ''
+            # Extra fields used by the share-to-story Lineup card so it can
+            # render the correct formation even for past polls (where the
+            # client doesn't already have state.players loaded).
+            r['number'] = player_row['number'] if player_row else ''
+            r['position'] = player_row['position'] if player_row else ''
+            r['is_starter'] = bool(player_row['is_starter']) if player_row else False
             if i == 0:
                 r['medal'] = 'gold'
             elif i == 1:
@@ -2520,6 +2526,97 @@ def api_results_visualization(poll_id):
     controversial_players = _compute_controversial(poll_id)
     controversial_player = controversial_players[0] if controversial_players else None
 
+    # ── Per-user payload (only when authenticated) ───────────────
+    # The share-to-story cards lean on personal data: user's own
+    # ratings, whether they predicted the fan-MVP correctly, current
+    # streak, total XP, XP earned from this specific match, etc.
+    # We bundle it into `my_stats` so the client gets everything in
+    # one round trip without hitting /api/profile/me + /api/poll/...
+    my_stats = None
+    uid = get_current_user_id()
+    if uid:
+        try:
+            mconn = get_connection()
+            try:
+                vote_rows = mconn.execute(
+                    'SELECT player_id, rating, timestamp FROM votes WHERE poll_id = ? AND user_id = ?',
+                    (poll_id, uid)
+                ).fetchall()
+                my_votes = {row['player_id']: row['rating'] for row in vote_rows}
+
+                # XP earned in a 10-minute window after the first vote in
+                # this poll. xp_log doesn't store poll_id, so this is the
+                # cleanest deterministic correlation we can make.
+                xp_for_match = 0
+                if vote_rows:
+                    first_ts = min(row['timestamp'] for row in vote_rows)
+                    xp_row = mconn.execute(
+                        'SELECT COALESCE(SUM(amount), 0) AS total FROM xp_log WHERE user_id = ? AND timestamp >= ? AND timestamp <= ?',
+                        (uid, first_ts, first_ts + 600)
+                    ).fetchone()
+                    xp_for_match = int(xp_row['total'] or 0) if xp_row else 0
+
+                # Did the user's max-rated player match the fan MVP?
+                fan_mvp_id = results[0]['player_id'] if results else None
+                user_top = None
+                if my_votes:
+                    user_top = max(my_votes.items(), key=lambda kv: kv[1])[0]
+                guessed_mvp = bool(fan_mvp_id and user_top and fan_mvp_id == user_top)
+
+                streak = get_user_streak(uid)
+                xp = get_user_xp(uid)
+                profile = get_profile(uid) or {}
+
+                my_stats = {
+                    'votes': my_votes,
+                    'fan_mvp_id': fan_mvp_id,
+                    'user_top_id': user_top,
+                    'guessed_mvp': guessed_mvp,
+                    'xp_for_match': xp_for_match,
+                    'streak': int(streak.get('current_streak', 0) or 0),
+                    'total_xp': int(xp.get('total_xp', 0) or 0),
+                    'level': xp.get('level', ''),
+                    'username': profile.get('username', '') or '',
+                    'first_name': profile.get('first_name', '') or '',
+                    'last_name': profile.get('last_name', '') or '',
+                    'auto_id': profile.get('custom_id') or 'chelsea-{:03d}'.format(uid % 1000),
+                    'avatar_url': profile.get('avatar') or profile.get('telegram_photo_url') or '',
+                }
+            finally:
+                mconn.close()
+        except Exception:
+            # Personal stats are a nice-to-have; don't fail the whole
+            # endpoint if e.g. the profile/streak/xp tables are empty
+            # (happens on a fresh deploy before a user has voted).
+            logger.exception("api_results_visualization: failed to assemble my_stats for uid=%s", uid)
+            my_stats = None
+
+    # ── Opponent name ─────────────────────────────────────────────
+    # Prefer match_analytics (set when the admin generates pre-match
+    # analytics), fall back to parsing the poll title — Chelsea polls
+    # are titled either "X vs Chelsea" or "Chelsea vs X".
+    opponent_name = ''
+    try:
+        aconn = get_connection()
+        try:
+            arow = aconn.execute(
+                'SELECT opponent_name FROM match_analytics WHERE match_id = ? OR poll_id = ? LIMIT 1',
+                (poll.get('match_id', ''), poll_id)
+            ).fetchone()
+            if arow and arow['opponent_name']:
+                opponent_name = arow['opponent_name']
+        finally:
+            aconn.close()
+    except Exception:
+        pass
+    if not opponent_name and poll.get('title'):
+        # Strip "Chelsea" + the "vs"/"v" separator, leave whatever's around.
+        title = str(poll['title']).strip()
+        parts = re.split(r'\s+v(?:s)?\.?\s+', title, flags=re.IGNORECASE, maxsplit=1)
+        if len(parts) == 2:
+            left, right = parts[0].strip(), parts[1].strip()
+            opponent_name = right if left.lower() == 'chelsea' else left
+
     return jsonify({
         "success": True,
         "poll": poll,
@@ -2528,6 +2625,8 @@ def api_results_visualization(poll_id):
         "best_match": all_stats.get('best_match'),
         "worst_match": all_stats.get('worst_match'),
         "controversial_player": controversial_player,
+        "opponent_name": opponent_name,
+        "my_stats": my_stats,
     })
 
 

@@ -453,13 +453,37 @@ var TRANSLATIONS = {
         // Share card
         share: {
             generate_card: 'Создать карточку',
-            pick_variant: 'Выбери дизайн',
-            variant_a: 'A — Состав',
-            variant_b: 'B — MVP',
-            variant_c: 'C — Stories',
             share_card: 'Поделиться карточкой',
             downloading: 'Генерация...',
-            card_ready: 'Карточка готова!'
+            card_ready: 'Карточка готова!',
+            // Variant picker
+            choose_variant: 'Выберите вариант',
+            variant_a_title: 'Состав',
+            variant_a_desc: 'Формация + все игроки + оценки',
+            variant_b_title: 'MVP',
+            variant_b_desc: 'Лучший игрок матча — обложка',
+            variant_c_title: 'Stats 9:16',
+            variant_c_desc: 'Топ-3 + статы под Stories',
+            generating: 'Рисуем картинку…',
+            no_data: 'Нет данных для карточки',
+            no_user_votes: 'Сначала проголосуй — карточка строится по твоим оценкам',
+            cancel: 'Отмена',
+            // Card body strings (rendered inside canvas)
+            card_mvp: 'PLAYER OF THE MATCH',
+            card_match_ratings: 'ОЦЕНКИ МАТЧА',
+            card_top3: 'ТОП-3',
+            card_voters: 'голосов',
+            card_avg_rating: 'средний балл',
+            card_brand: '@ChelseaVotingBot',
+            card_vs: 'vs',
+            card_my_ratings: 'Мои оценки',
+            card_bench: 'ЗАПАС',
+            card_others: 'Остальные',
+            card_guessed_mvp: 'Угадал MVP',
+            card_streak: 'Серия',
+            card_streak_unit: 'матчей подряд',
+            card_xp_for_match: 'XP за матч',
+            card_round: 'тур'
         },
         live: {
             voters_now: 'уже проголосовали',
@@ -983,16 +1007,39 @@ var TRANSLATIONS = {
         },
 
         // Share card
-        // Share card
         share: {
             generate_card: 'Generate Card',
-            pick_variant: 'Pick a design',
-            variant_a: 'A — Lineup',
-            variant_b: 'B — MVP',
-            variant_c: 'C — Stories',
             share_card: 'Share Card',
             downloading: 'Generating...',
-            card_ready: 'Card ready!'
+            card_ready: 'Card ready!',
+            // Variant picker
+            choose_variant: 'Choose a layout',
+            variant_a_title: 'Lineup',
+            variant_a_desc: 'Formation + all players + ratings',
+            variant_b_title: 'MVP',
+            variant_b_desc: 'Best player magazine cover',
+            variant_c_title: 'Stats 9:16',
+            variant_c_desc: 'Top-3 + stats for Stories',
+            generating: 'Drawing image…',
+            no_data: 'No data for the card',
+            no_user_votes: 'Vote first — the card uses your own ratings',
+            cancel: 'Cancel',
+            // Card body strings (rendered inside canvas)
+            card_mvp: 'PLAYER OF THE MATCH',
+            card_match_ratings: 'MATCH RATINGS',
+            card_top3: 'TOP 3',
+            card_voters: 'votes',
+            card_avg_rating: 'avg rating',
+            card_brand: '@ChelseaVotingBot',
+            card_vs: 'vs',
+            card_my_ratings: 'My ratings',
+            card_bench: 'BENCH',
+            card_others: 'Others',
+            card_guessed_mvp: 'Guessed MVP',
+            card_streak: 'Streak',
+            card_streak_unit: 'in a row',
+            card_xp_for_match: 'XP this match',
+            card_round: 'round'
         },
         live: {
             voters_now: 'voted already',

@@ -13,7 +13,7 @@
     -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Manrope:wght@400;500;600;700;800&family=Roboto:wght@400;500;700;900&family=Oswald:wght@400;500;600;700&family=Russo+One&display=swap">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;500;600;700;800&family=Manrope:wght@400;500;600;700;800&family=Roboto:wght@400;500;700;900&family=Oswald:wght@400;500;600;700&family=Russo+One&display=swap">
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -160,6 +160,19 @@
 
 <!-- ═══ Toast notification ═══ -->
 <div id="toast" style="display:none"></div>
+
+<!-- ═══ Share-to-Story variant picker modal ═══ -->
+<div id="share-modal" class="share-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="share-modal-title" onclick="if(event.target===this) closeShareModal()">
+    <div class="share-modal-card" role="document">
+        <div class="share-modal-header">
+            <h3 id="share-modal-title">Поделиться</h3>
+            <button class="share-modal-close" onclick="closeShareModal()" aria-label="Close">&times;</button>
+        </div>
+        <div class="share-modal-variants" id="share-modal-variants">
+            <!-- 3 variant tiles injected by JS to keep i18n strings in one place -->
+        </div>
+    </div>
+</div>
 
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <script src="i18n.js"></script>

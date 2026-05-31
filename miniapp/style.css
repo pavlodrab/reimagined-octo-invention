@@ -1743,45 +1743,43 @@ html[data-user-bg="1"] body::after {
 }
 
 
-
-/* ─────────────────────────────────────────────────────────────────
-   Share Card variant picker (full-screen modal).
-   Three preview tiles: A/B square, C tall (9:16). Tap one to render
-   the full-size card and trigger the share sheet.
-   ───────────────────────────────────────────────────────────────── */
-.share-modal-overlay {
+/* ── Share-to-Story variant picker modal ───────────────────────
+   Used by openShareModal() / closeShareModal() in script.js.
+   Three variant tiles (A/B/C) sit in a column on phones; on
+   wider screens they span the row. Each tile owns a tiny SVG
+   preview so the user can see the layout before committing.   */
+.share-modal {
     position: fixed;
     inset: 0;
-    z-index: 10000;
-    background: rgba(0,0,0,0.78);
+    z-index: 1000;
+    background: rgba(5, 12, 26, 0.78);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
     display: flex;
     align-items: flex-end;
     justify-content: center;
-    padding: 20px;
-    backdrop-filter: blur(6px);
-    -webkit-backdrop-filter: blur(6px);
-    animation: shareModalFadeIn 0.18s ease-out;
+    animation: share-modal-fade 0.22s ease-out;
 }
-@keyframes shareModalFadeIn {
-    from { opacity: 0; }
-    to { opacity: 1; }
-}
-.share-modal {
+@keyframes share-modal-fade { from { opacity: 0; } to { opacity: 1; } }
+.share-modal-card {
     width: 100%;
-    max-width: 480px;
+    max-width: 520px;
     background: var(--bg-card);
+    border-top: 3px solid var(--gold);
     border-radius: 20px 20px 0 0;
-    padding: 18px 16px 24px;
-    box-shadow: 0 -8px 40px rgba(0,0,0,0.5);
-    animation: shareModalSlideUp 0.22s ease-out;
+    padding: 18px 18px calc(18px + env(safe-area-inset-bottom));
+    box-shadow: 0 -10px 40px rgba(0, 0, 0, 0.5);
+    animation: share-modal-slide 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
+    max-height: 88vh;
+    overflow-y: auto;
 }
-@media (min-width: 600px) {
-    .share-modal-overlay { align-items: center; }
-    .share-modal { border-radius: 20px; }
+@keyframes share-modal-slide {
+    from { transform: translateY(100%); }
+    to   { transform: translateY(0); }
 }
-@keyframes shareModalSlideUp {
-    from { transform: translateY(40px); opacity: 0; }
-    to   { transform: translateY(0);    opacity: 1; }
+@media (min-width: 640px) {
+    .share-modal { align-items: center; }
+    .share-modal-card { border-radius: 20px; max-width: 720px; }
 }
 .share-modal-header {
     display: flex;
@@ -1790,63 +1788,90 @@ html[data-user-bg="1"] body::after {
     margin-bottom: 14px;
 }
 .share-modal-header h3 {
-    margin: 0;
     color: var(--gold);
     font-size: 1.1rem;
+    font-weight: 700;
+    font-family: var(--font-display);
 }
 .share-modal-close {
     background: none;
     border: none;
     color: var(--text-dim);
-    font-size: 1.2rem;
+    font-size: 1.6rem;
+    line-height: 1;
     cursor: pointer;
-    padding: 4px 8px;
-    border-radius: 6px;
+    padding: 4px 10px;
+    border-radius: 8px;
+    transition: background 0.15s;
 }
-.share-modal-close:hover { background: var(--bg); color: var(--text); }
-.share-variants {
+.share-modal-close:hover { background: rgba(255, 255, 255, 0.06); color: var(--text); }
+
+.share-modal-variants {
     display: grid;
-    grid-template-columns: 1fr 1fr 1fr;
-    gap: 10px;
+    grid-template-columns: 1fr;
+    gap: 12px;
 }
-.share-variant {
-    cursor: pointer;
-    border-radius: 12px;
-    overflow: hidden;
-    border: 2px solid transparent;
-    background: var(--bg);
-    transition: transform 0.12s, border-color 0.12s, box-shadow 0.12s;
-    display: flex;
-    flex-direction: column;
+@media (min-width: 560px) {
+    .share-modal-variants { grid-template-columns: 1fr 1fr 1fr; }
 }
-.share-variant:hover {
-    transform: translateY(-2px);
-    border-color: var(--gold);
-    box-shadow: 0 8px 24px rgba(219,161,17,0.25);
-}
-.share-variant:active { transform: scale(0.97); }
-.share-variant-canvas {
-    width: 100%;
-    aspect-ratio: 1 / 1;
-    overflow: hidden;
-    background: #0a1628;
+
+.share-variant-card {
     display: flex;
     align-items: center;
-    justify-content: center;
-}
-.share-variant[data-variant="C"] .share-variant-canvas {
-    aspect-ratio: 9 / 16;
-}
-.share-variant-canvas canvas {
-    width: 100%;
-    height: 100%;
-    display: block;
-}
-.share-variant-label {
-    text-align: center;
-    padding: 8px 4px;
-    font-size: 0.72rem;
-    font-weight: 600;
+    gap: 12px;
+    padding: 12px;
+    background: var(--bg);
+    border: 2px solid transparent;
+    border-radius: 14px;
+    cursor: pointer;
+    text-align: left;
     color: var(--text);
+    font-family: var(--font-body);
+    transition: all 0.15s;
+}
+@media (min-width: 560px) {
+    .share-variant-card { flex-direction: column; align-items: stretch; text-align: center; }
+}
+.share-variant-card:hover {
+    border-color: var(--blue-light);
     background: var(--bg-card-hover);
+    transform: translateY(-2px);
+}
+.share-variant-card:focus-visible {
+    outline: none;
+    border-color: var(--gold);
+    box-shadow: 0 0 0 3px rgba(219, 161, 17, 0.25);
+}
+.share-variant-card[disabled] {
+    opacity: 0.5;
+    cursor: wait;
+    transform: none;
+}
+
+.share-variant-preview {
+    flex-shrink: 0;
+    width: 72px;
+    height: 90px;
+    border-radius: 10px;
+    background: linear-gradient(160deg, #022d5c, #034694 55%, #0a1628);
+    overflow: hidden;
+    position: relative;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+}
+@media (min-width: 560px) {
+    .share-variant-preview { width: 100%; height: 110px; }
+}
+.share-variant-preview svg { width: 100%; height: 100%; display: block; }
+
+.share-variant-text { flex: 1; min-width: 0; }
+.share-variant-title {
+    font-weight: 700;
+    font-size: 0.95rem;
+    color: var(--gold);
+    margin-bottom: 2px;
+}
+.share-variant-desc {
+    font-size: 0.78rem;
+    color: var(--text-dim);
+    line-height: 1.35;
 }

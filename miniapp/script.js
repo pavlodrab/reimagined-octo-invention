@@ -1505,7 +1505,7 @@ async function renderPollResults(pollId) {
         // Share button
         html += '<div style="text-align:center;margin-top:12px;">';
         html += '<button class="share-btn" onclick="shareResults(\'' + pollId + '\')">' + t('social.share_results') + '</button>';
-        html += '<button class="share-card-btn" onclick="shareResultCard(\'' + pollId + '\')">&#x1f5bc;&#xfe0f; ' + t('share.generate_card') + '</button>';
+        html += '<button class="share-card-btn" onclick="openShareModal(\'' + pollId + '\')">&#x1f5bc;&#xfe0f; ' + t('social.share') + '</button>';
         html += '</div>';
 
         container.innerHTML = html;
@@ -1538,134 +1538,1282 @@ async function shareResults(pollId) {
     } catch (e) { toast(t('common.error')); }
 }
 
-/* ═══ Result Card Generation (Canvas API) ═══ */
+/* ═══════════════════════════════════════════════════════════════
+   Share-to-Story  ── 3-variant card generator
+   ═══════════════════════════════════════════════════════════════
+   Pipeline:
+     openShareModal(pollId) → user picks A/B/C
+       → generateLineupCardA / generateMVPCardB / generateStatsCardC
+         → shareCanvas() (tg.shareToStory → navigator.share → download)
 
-async function generateResultCard(pollId) {
-    // Fetch results data
+   Designs:
+     A — Lineup, 1080×1350: pitch + formation + gold rating circles
+     B — MVP cover, 1080×1920: hero player, magazine-cover layout
+     C — Stats card, 1080×1920: top-3 podium + key stats for Stories
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Cache the visualization payload between repeated opens of the modal
+   for the same poll so picking a second variant doesn't refetch.       */
+var _shareCache = {};
+
+async function _loadCardData(pollId) {
+    if (_shareCache[pollId]) return _shareCache[pollId];
     var data = await api('/api/results/' + pollId + '/visualization');
-    if (!data.success || !data.results) { toast(t('common.error')); return null; }
-
-    var results = data.results;
+    if (!data || !data.success || !data.results) return null;
     var poll = data.poll || state.currentPoll || {};
-    var totalVoters = data.total_voters || 0;
+    // Merge in number/position/is_starter from state.players when the
+    // backend didn't supply them (older deploys / cached responses) and
+    // the poll happens to be the one the user is currently looking at.
+    if (state.currentPoll && poll.poll_id === state.currentPoll.poll_id && Array.isArray(state.players)) {
+        var byId = {};
+        state.players.forEach(function(p) { byId[p.player_id || p.id] = p; });
+        data.results.forEach(function(r) {
+            var p = byId[r.player_id];
+            if (p) {
+                if (r.number == null || r.number === '') r.number = p.number;
+                if (!r.position) r.position = p.position;
+                if (typeof r.is_starter !== 'boolean') r.is_starter = !!p.is_starter;
+                if (!r.photo_url) r.photo_url = p.photo_url;
+            }
+        });
+    }
+    _shareCache[pollId] = data;
+    return data;
+}
 
-    // Create canvas
-    var canvas = document.createElement('canvas');
-    canvas.width = 600;
-    canvas.height = 800;
-    var ctx = canvas.getContext('2d');
+/* Promise-wrapped Image() loader. Resolves with the loaded HTMLImageElement
+   on success, or null on error / network failure. We always set
+   crossOrigin='anonymous' BEFORE assigning src so the canvas isn't tainted
+   when the host serves CORS headers; if the host doesn't, the load itself
+   fails and we resolve null — caller draws a colored placeholder instead.   */
+function _loadImageSafe(url) {
+    return new Promise(function(resolve) {
+        if (!url) { resolve(null); return; }
+        var img = new Image();
+        img.crossOrigin = 'anonymous';
+        var done = false;
+        var finish = function(ok) {
+            if (done) return;
+            done = true;
+            resolve(ok ? img : null);
+        };
+        img.onload = function() { finish(true); };
+        img.onerror = function() { finish(false); };
+        // Hard timeout so a slow CDN doesn't block card generation forever.
+        setTimeout(function() { finish(false); }, 5000);
+        img.src = url;
+    });
+}
 
-    // Background gradient (Chelsea blue)
-    var grad = ctx.createLinearGradient(0, 0, 0, 800);
-    grad.addColorStop(0, '#022d5c');
-    grad.addColorStop(0.5, '#034694');
-    grad.addColorStop(1, '#0a1628');
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, 600, 800);
-
-    // Decorative lines
-    ctx.strokeStyle = 'rgba(219, 161, 17, 0.3)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(30, 80);
-    ctx.lineTo(570, 80);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(30, 720);
-    ctx.lineTo(570, 720);
-    ctx.stroke();
-
-    // Title
-    ctx.fillStyle = '#DBA111';
-    ctx.font = 'bold 28px -apple-system, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText(poll.title || 'Match Results', 300, 50);
-
-    // Subtitle
-    ctx.fillStyle = '#8899b0';
-    ctx.font = '16px -apple-system, sans-serif';
-    ctx.fillText('Chelsea Voting Bot - Player Ratings', 300, 110);
-
-    // Total voters
-    ctx.fillStyle = '#ffffff';
-    ctx.font = '14px -apple-system, sans-serif';
-    ctx.fillText(totalVoters + ' voters', 300, 135);
-
-    // Top 5 players
-    var top5 = results.slice(0, 5);
-    var startY = 180;
-    var rowHeight = 100;
-
-    for (var i = 0; i < top5.length; i++) {
-        var r = top5[i];
-        var y = startY + i * rowHeight;
-        var playerName = r.player_name || r.name || r.player_id;
-
-        // Medal/rank circle
-        var circleColors = ['#DBA111', '#c0c0c0', '#cd7f32', '#034694', '#034694'];
+/* roundRect polyfill — older Safari and the in-Telegram WebView on
+   some Android builds still ship a Canvas without it.                    */
+function _roundRect(ctx, x, y, w, h, r) {
+    if (typeof ctx.roundRect === 'function') {
         ctx.beginPath();
-        ctx.arc(60, y + 30, 22, 0, Math.PI * 2);
-        ctx.fillStyle = circleColors[i];
-        ctx.fill();
-        ctx.fillStyle = i < 3 ? '#000' : '#fff';
-        ctx.font = 'bold 18px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText(String(i + 1), 60, y + 36);
+        ctx.roundRect(x, y, w, h, r);
+        return;
+    }
+    r = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+}
 
-        // Player name
-        ctx.textAlign = 'left';
-        ctx.fillStyle = '#ffffff';
-        ctx.font = 'bold 20px -apple-system, sans-serif';
-        ctx.fillText(playerName, 100, y + 25);
+/* Initials fallback for circular avatars — first letter of given name. */
+function _initialOf(name) {
+    if (!name) return '?';
+    var parts = String(name).trim().split(/\s+/);
+    return (parts[0][0] || '?').toUpperCase();
+}
 
-        // Rating bar
-        var maxWidth = 350;
-        var barWidth = (r.avg_rating / (poll.max_rating || 15)) * maxWidth;
-        barWidth = Math.min(maxWidth, Math.max(20, barWidth));
-
-        var barGrad = ctx.createLinearGradient(100, y + 40, 100 + barWidth, y + 40);
-        barGrad.addColorStop(0, '#034694');
-        barGrad.addColorStop(1, '#DBA111');
-        ctx.fillStyle = barGrad;
-        if (ctx.roundRect) {
-            ctx.beginPath();
-            ctx.roundRect(100, y + 38, barWidth, 16, 8);
-            ctx.fill();
+/* Draw an image clipped to a circle. If img is null, draw a Chelsea-blue
+   disk with the player initial — same visual language as the in-app
+   placeholder so the card looks intentional even when CORS denies us.    */
+function _drawCircularPhoto(ctx, img, cx, cy, radius, name) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.closePath();
+    ctx.clip();
+    if (img) {
+        // Cover-fit: scale the image so the smaller side fills the circle.
+        var iw = img.naturalWidth || img.width;
+        var ih = img.naturalHeight || img.height;
+        if (iw > 0 && ih > 0) {
+            var scale = Math.max((radius * 2) / iw, (radius * 2) / ih);
+            var dw = iw * scale, dh = ih * scale;
+            ctx.drawImage(img, cx - dw / 2, cy - dh / 2, dw, dh);
         } else {
-            ctx.fillRect(100, y + 38, barWidth, 16);
+            ctx.fillStyle = '#034694';
+            ctx.fillRect(cx - radius, cy - radius, radius * 2, radius * 2);
         }
+    } else {
+        ctx.fillStyle = '#034694';
+        ctx.fillRect(cx - radius, cy - radius, radius * 2, radius * 2);
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold ' + Math.round(radius * 0.9) + 'px ' + (window.getComputedStyle(document.body).fontFamily || 'sans-serif');
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(_initialOf(name), cx, cy);
+    }
+    ctx.restore();
+}
 
-        // Rating value
-        ctx.fillStyle = '#DBA111';
-        ctx.font = 'bold 22px sans-serif';
-        ctx.textAlign = 'right';
-        ctx.fillText(r.avg_rating != null ? r.avg_rating.toFixed(1) : '-', 560, y + 36);
+/* Gold rating "chip" — radial gradient disk with a 1-decimal number.    */
+function _drawRatingBadge(ctx, cx, cy, radius, value, fontFamily) {
+    var g = ctx.createRadialGradient(cx - radius / 3, cy - radius / 3, 1, cx, cy, radius);
+    g.addColorStop(0, '#f6d365');
+    g.addColorStop(0.55, '#DBA111');
+    g.addColorStop(1, '#a07509');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+    ctx.lineWidth = Math.max(2, radius * 0.06);
+    ctx.stroke();
+    ctx.fillStyle = '#0a1628';
+    ctx.font = 'bold ' + Math.round(radius * 0.9) + 'px ' + (fontFamily || 'sans-serif');
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    var label = (value == null || isNaN(value)) ? '–' : Number(value).toFixed(1);
+    ctx.fillText(label, cx, cy + radius * 0.04);
+}
 
-        ctx.textAlign = 'left';
+/* Truncate a player's display name to "F. Lastname" when it's too long
+   for a tight slot on the lineup card.                                   */
+function _shortName(name, maxChars) {
+    if (!name) return '';
+    if (name.length <= maxChars) return name;
+    var parts = name.trim().split(/\s+/);
+    if (parts.length >= 2) {
+        var short = parts[0][0] + '. ' + parts[parts.length - 1];
+        if (short.length <= maxChars) return short;
+        return short.slice(0, maxChars - 1) + '…';
+    }
+    return name.slice(0, maxChars - 1) + '…';
+}
+
+/* Pick a sensible football formation from the position counts of the
+   eleven starters. Returns an array of "lines" from defense → attack,
+   each line is { count, key }. We always seed a 1-keeper line first.    */
+function _pickFormation(starters) {
+    var def = 0, mid = 0, fwd = 0;
+    starters.forEach(function(p) {
+        var pos = String(p.position || '').toUpperCase();
+        if (pos.indexOf('GK') >= 0 || pos.indexOf('G') === 0) return;
+        if (pos.indexOf('D') === 0 || pos.indexOf('B') >= 0) def++;
+        else if (pos.indexOf('F') === 0 || pos.indexOf('W') >= 0 || pos.indexOf('S') >= 0) fwd++;
+        else mid++;
+    });
+    // Heuristic: if totals don't add up to 10 outfielders we fall back
+    // to 4-3-3 — Chelsea's most common shape.
+    if (def + mid + fwd !== 10) {
+        def = 4; mid = 3; fwd = 3;
+    }
+    return [
+        { key: 'GK',  count: 1   },
+        { key: 'DEF', count: def },
+        { key: 'MID', count: mid },
+        { key: 'FWD', count: fwd }
+    ];
+}
+
+/* Strip "Chelsea" from a poll title to produce just the opponent name.
+   Handles "Chelsea vs X", "X vs Chelsea", "Chelsea v X" variants.       */
+function _extractOpponent(title) {
+    if (!title) return '';
+    var parts = String(title).split(/\s+v(?:s)?\.?\s+/i);
+    if (parts.length === 2) {
+        var left = parts[0].trim(), right = parts[1].trim();
+        if (left.toLowerCase() === 'chelsea') return right;
+        if (right.toLowerCase() === 'chelsea') return left;
+        // Title doesn't include Chelsea on either side — return the right
+        // side as a sensible default.
+        return right;
+    }
+    return title;
+}
+
+/* Last-name extractor for the variant-B headline. Multi-word names like
+   "De Bruyne" or "Van Dijk" keep the whole tail; single-name players
+   (Pedro, Ronaldinho) get returned whole. ASCII-only normalisation
+   would break Cyrillic, so we just split on whitespace.                  */
+function _surnameOf(name) {
+    if (!name) return '';
+    var parts = String(name).trim().split(/\s+/);
+    if (parts.length === 1) return parts[0];
+    // If the surname is a particle ("Van", "De", "Da"), include it +
+    // the next token.
+    var last = parts[parts.length - 1];
+    var second = parts[parts.length - 2] || '';
+    if (/^(van|de|da|del|di|du|el|la|le|von)$/i.test(second)) {
+        return second + ' ' + last;
+    }
+    return last;
+}
+
+/* Format a unix timestamp (seconds) as a localized "12 April"-style
+   string. Falls back to ISO date when Intl is somehow unavailable.      */
+function _formatMatchDate(unixSeconds) {
+    if (!unixSeconds) return '';
+    var d = new Date(unixSeconds * 1000);
+    if (isNaN(d.getTime())) return '';
+    try {
+        var lang = (typeof getLang === 'function' ? getLang() : 'ru');
+        return d.toLocaleDateString(lang === 'ru' ? 'ru-RU' : 'en-GB', {
+            day: 'numeric', month: 'long'
+        });
+    } catch (e) {
+        return d.toISOString().slice(0, 10);
+    }
+}
+
+/* Resolve which rating map to use for the canvas:
+     1) data.my_stats.votes  (authenticated, returned by backend)
+     2) state.myRatings      (current poll, already in client state)
+     3) null                 (caller falls back to community avg)         */
+function _pickRatings(data, pollId) {
+    if (data && data.my_stats && data.my_stats.votes && Object.keys(data.my_stats.votes).length) {
+        return data.my_stats.votes;
+    }
+    if (state.currentPoll && state.currentPoll.poll_id === pollId
+        && state.myRatings && Object.keys(state.myRatings).length) {
+        return state.myRatings;
+    }
+    return null;
+}
+
+/* Wait for the share-card webfonts to actually paint before we draw —
+   without this, Russo One / Bebas Neue swap mid-render and produce
+   different glyph metrics than what was measured. document.fonts.load
+   resolves either way and never throws.                                 */
+async function _loadFontsForCanvas() {
+    if (!document.fonts || !document.fonts.load) return;
+    try {
+        await Promise.all([
+            document.fonts.load('bold 130px "Bebas Neue"'),
+            document.fonts.load('bold 80px "Russo One"'),
+            document.fonts.load('bold 40px "Oswald"'),
+            document.fonts.load('bold 30px "Inter"')
+        ]);
+    } catch (e) { /* ignore — fall back fonts will paint */ }
+}
+
+/* Draw a stylised gold Chelsea crest. We don't ship the official badge
+   (trademark) — instead we render a shield silhouette with a gold "C"
+   lettermark. Same visual hook ("blue club, gold mark") without
+   reproducing the licensed artwork.                                    */
+function _drawChelseaCrest(ctx, x, y, size) {
+    var w = size, h = size * 1.18;
+    ctx.save();
+    ctx.translate(x, y);
+
+    // Shield outline path.
+    var path = new Path2D();
+    path.moveTo(w * 0.08, h * 0.08);
+    path.lineTo(w * 0.92, h * 0.08);
+    path.lineTo(w * 0.92, h * 0.55);
+    path.bezierCurveTo(w * 0.92, h * 0.85, w * 0.65, h * 0.99, w * 0.5, h * 0.99);
+    path.bezierCurveTo(w * 0.35, h * 0.99, w * 0.08, h * 0.85, w * 0.08, h * 0.55);
+    path.closePath();
+
+    // Gold gradient fill.
+    var grad = ctx.createLinearGradient(0, 0, 0, h);
+    grad.addColorStop(0, '#f6d365');
+    grad.addColorStop(0.5, '#DBA111');
+    grad.addColorStop(1, '#a07509');
+    ctx.fillStyle = grad;
+    ctx.fill(path);
+
+    // Inner darker core for depth.
+    ctx.save();
+    ctx.clip(path);
+    ctx.fillStyle = 'rgba(0,0,0,0.18)';
+    ctx.fillRect(0, h * 0.6, w, h);
+    ctx.restore();
+
+    // Outline.
+    ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+    ctx.lineWidth = Math.max(2, w * 0.025);
+    ctx.stroke(path);
+
+    // Centered "C" lettermark.
+    ctx.fillStyle = '#022d5c';
+    ctx.font = 'bold ' + Math.round(h * 0.55) + 'px "Russo One", "Oswald", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('C', w / 2, h * 0.5);
+
+    ctx.restore();
+}
+
+/* Diagonal gold slash for variant B's magazine-cover backdrop.         */
+function _drawDiagonalGoldStripe(ctx, w, h, opts) {
+    opts = opts || {};
+    var thickness = opts.thickness || w * 0.18;
+    var alpha = opts.alpha == null ? 0.85 : opts.alpha;
+    ctx.save();
+    ctx.translate(w / 2, h / 2);
+    ctx.rotate(-Math.PI / 4.2);
+    var grad = ctx.createLinearGradient(-w, 0, w, 0);
+    grad.addColorStop(0, 'rgba(219,161,17,0)');
+    grad.addColorStop(0.4, 'rgba(219,161,17,' + alpha + ')');
+    grad.addColorStop(0.6, 'rgba(219,161,17,' + alpha + ')');
+    grad.addColorStop(1, 'rgba(219,161,17,0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(-w, -thickness / 2, w * 2, thickness);
+    ctx.restore();
+}
+
+/* ═══ Variant A — Lineup card (1080 × 1350) ═══
+   Spec: 4-3-3 (or actual) on a blue gradient with the gold Chelsea
+   crest top-left, "vs Opponent" headline, every starter on their
+   formation slot with photo + gold rating circle showing the user's
+   own rating, plus a bench strip at the bottom with the subs.
+   @ChelseaVotingBot tag in the corner.                                  */
+async function generateLineupCardA(pollId) {
+    var data = await _loadCardData(pollId);
+    if (!data) return null;
+    await _loadFontsForCanvas();
+
+    var poll = data.poll || {};
+    var results = data.results || [];
+    var opponent = data.opponent_name || _extractOpponent(poll.title);
+
+    // Index results by player_id for fast lookups inside the formation
+    // walk and the bench draw.
+    var byId = {};
+    results.forEach(function(r) { byId[r.player_id] = r; });
+
+    // Pick rating source: user's own ratings first, community avg as
+    // fallback so legacy/anonymous views still produce a useful image.
+    var myRatings = _pickRatings(data, pollId);
+    function ratingFor(playerId) {
+        if (myRatings && myRatings[playerId] != null) return myRatings[playerId];
+        var r = byId[playerId];
+        return r ? r.avg_rating : null;
     }
 
-    // Footer
-    ctx.fillStyle = '#8899b0';
-    ctx.font = '12px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText('Generated by Chelsea Voting Bot', 300, 760);
-    ctx.fillText(new Date().toLocaleDateString(), 300, 780);
+    // Starters and bench split. Prefer is_starter flag; if it's missing
+    // for everybody, top-11 by community rating still produces a pitch.
+    var starters = results.filter(function(r) { return r.is_starter; });
+    var bench = results.filter(function(r) { return !r.is_starter; });
+    if (starters.length < 11) {
+        var sorted = results.slice().sort(function(a, b) {
+            return (b.avg_rating || 0) - (a.avg_rating || 0);
+        });
+        starters = sorted.slice(0, 11);
+        var startersIds = {};
+        starters.forEach(function(p) { startersIds[p.player_id] = 1; });
+        bench = results.filter(function(r) { return !startersIds[r.player_id]; });
+    } else {
+        starters = starters.slice(0, 11);
+    }
+
+    var W = 1080, H = 1350;
+    var canvas = document.createElement('canvas');
+    canvas.width = W; canvas.height = H;
+    var ctx = canvas.getContext('2d');
+    var fontDisp = '"Russo One", "Oswald", "Inter", -apple-system, sans-serif';
+    var fontBody = '"Inter", -apple-system, sans-serif';
+
+    // ── Background: deep Chelsea blue ──
+    var bgGrad = ctx.createLinearGradient(0, 0, 0, H);
+    bgGrad.addColorStop(0, '#022d5c');
+    bgGrad.addColorStop(0.6, '#034694');
+    bgGrad.addColorStop(1, '#0a1628');
+    ctx.fillStyle = bgGrad;
+    ctx.fillRect(0, 0, W, H);
+    // Subtle noise so the gradient doesn't band on cheap displays.
+    ctx.globalAlpha = 0.04;
+    for (var n = 0; n < 240; n++) {
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(Math.random() * W, Math.random() * H, 1.5, 1.5);
+    }
+    ctx.globalAlpha = 1;
+
+    // ── Header: gold crest + "vs Opponent" ──
+    _drawChelseaCrest(ctx, 50, 36, 90);
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 52px ' + fontDisp;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    var headline = t('share.card_vs') + ' ' + (opponent || '—').toUpperCase();
+    if (headline.length > 22) {
+        ctx.font = 'bold 40px ' + fontDisp;
+    }
+    ctx.fillText(headline, 170, 50);
+
+    ctx.fillStyle = '#DBA111';
+    ctx.font = 'bold 24px ' + fontBody;
+    ctx.fillText(t('share.card_my_ratings'), 170, 110);
+
+    // ── Pitch panel ──
+    var pitchX = 40, pitchY = 180, pitchW = W - 80, pitchH = 880;
+    var pitchGrad = ctx.createLinearGradient(0, pitchY, 0, pitchY + pitchH);
+    pitchGrad.addColorStop(0, '#0e6b2c');
+    pitchGrad.addColorStop(1, '#083d18');
+    ctx.fillStyle = pitchGrad;
+    _roundRect(ctx, pitchX, pitchY, pitchW, pitchH, 28);
+    ctx.fill();
+
+    // Pitch markings
+    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+    ctx.lineWidth = 3;
+    _roundRect(ctx, pitchX + 16, pitchY + 16, pitchW - 32, pitchH - 32, 18);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(pitchX + 16, pitchY + pitchH / 2);
+    ctx.lineTo(pitchX + pitchW - 16, pitchY + pitchH / 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(pitchX + pitchW / 2, pitchY + pitchH / 2, 84, 0, Math.PI * 2);
+    ctx.stroke();
+    var boxW = 360, boxH = 120;
+    ctx.strokeRect(pitchX + (pitchW - boxW) / 2, pitchY + 16, boxW, boxH);
+    ctx.strokeRect(pitchX + (pitchW - boxW) / 2, pitchY + pitchH - 16 - boxH, boxW, boxH);
+
+    // ── Formation distribution ──
+    var formation = _pickFormation(starters);
+    var bins = { GK: [], DEF: [], MID: [], FWD: [] };
+    starters.forEach(function(p) {
+        var pos = String(p.position || '').toUpperCase();
+        if (pos.indexOf('GK') >= 0 || pos.indexOf('G') === 0) bins.GK.push(p);
+        else if (pos.indexOf('D') === 0 || pos.indexOf('B') >= 0) bins.DEF.push(p);
+        else if (pos.indexOf('F') === 0 || pos.indexOf('W') >= 0 || pos.indexOf('S') >= 0) bins.FWD.push(p);
+        else bins.MID.push(p);
+    });
+    var queue = [];
+    formation.forEach(function(line) {
+        var bin = bins[line.key] || [];
+        for (var i = 0; i < line.count; i++) {
+            if (bin.length) queue.push({ line: line.key, p: bin.shift() });
+            else queue.push({ line: line.key, p: null });
+        }
+    });
+    ['DEF','MID','FWD'].forEach(function(k) {
+        bins[k].forEach(function(p) { queue.push({ line: 'MID', p: p }); });
+    });
+
+    var yBands = {
+        FWD: pitchY + pitchH * 0.18,
+        MID: pitchY + pitchH * 0.42,
+        DEF: pitchY + pitchH * 0.66,
+        GK:  pitchY + pitchH * 0.88
+    };
+
+    // Pre-load every photo in parallel — about 11 starters + ≤7 bench.
+    var allItems = queue.concat(bench.map(function(p) { return { line: 'BENCH', p: p }; }));
+    var photos = await Promise.all(allItems.map(function(it) {
+        return it.p ? _loadImageSafe(it.p.photo_url) : Promise.resolve(null);
+    }));
+    var starterPhotos = photos.slice(0, queue.length);
+    var benchPhotos = photos.slice(queue.length);
+
+    function drawStarterSlot(item, photo, cx, cy) {
+        var p = item.p;
+        var radius = 60;
+        // Shadow + gold ring
+        ctx.save();
+        ctx.shadowColor = 'rgba(0,0,0,0.45)';
+        ctx.shadowBlur = 16;
+        ctx.shadowOffsetY = 5;
+        ctx.fillStyle = '#DBA111';
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius + 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+        _drawCircularPhoto(ctx, photo, cx, cy, radius, p ? p.player_name : '?');
+
+        if (p && p.number) {
+            ctx.fillStyle = '#0a1628';
+            ctx.beginPath();
+            ctx.arc(cx - radius + 4, cy + radius - 6, 20, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#DBA111';
+            ctx.lineWidth = 2.5;
+            ctx.stroke();
+            ctx.fillStyle = '#DBA111';
+            ctx.font = 'bold 20px ' + fontDisp;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(String(p.number), cx - radius + 4, cy + radius - 6);
+        }
+        if (p) {
+            // Big gold rating disc top-right (the user's own number).
+            _drawRatingBadge(ctx, cx + radius - 2, cy - radius + 2, 30, ratingFor(p.player_id), fontDisp);
+            // Name pill
+            var nm = _shortName(p.player_name, 14);
+            ctx.font = 'bold 24px ' + fontBody;
+            var tw = ctx.measureText(nm).width;
+            var pillW = Math.max(tw + 24, 120);
+            var pillH = 34;
+            var pillX = cx - pillW / 2;
+            var pillY = cy + radius + 12;
+            ctx.fillStyle = 'rgba(10,22,40,0.88)';
+            _roundRect(ctx, pillX, pillY, pillW, pillH, 17);
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(219,161,17,0.55)';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+            ctx.fillStyle = '#ffffff';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(nm, cx, pillY + pillH / 2);
+        }
+    }
+
+    var idx = 0;
+    formation.forEach(function(line) {
+        var n = line.count;
+        if (n === 0) return;
+        var bandY = yBands[line.key];
+        var marginX = 110;
+        var avail = pitchW - marginX * 2;
+        for (var i = 0; i < n; i++) {
+            var cx = pitchX + marginX + (avail * (i + 0.5) / n);
+            var item = queue[idx];
+            var photo = starterPhotos[idx];
+            idx++;
+            if (item) drawStarterSlot(item, photo, cx, bandY);
+        }
+    });
+
+    // ── Bench strip ──
+    var benchY = 1090;
+    var benchH = 180;
+    ctx.fillStyle = 'rgba(255,255,255,0.05)';
+    _roundRect(ctx, 40, benchY, W - 80, benchH, 20);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(219,161,17,0.3)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    ctx.fillStyle = '#DBA111';
+    ctx.font = 'bold 22px ' + fontDisp;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText(t('share.card_bench'), 60, benchY + 14);
+
+    var benchToShow = bench.slice(0, 7);
+    if (benchToShow.length) {
+        var benchSlotW = (W - 120) / benchToShow.length;
+        benchToShow.forEach(function(p, i) {
+            var cx = 60 + benchSlotW * (i + 0.5);
+            var cy = benchY + benchH * 0.55;
+            var radius = 36;
+            // Mini gold ring
+            ctx.fillStyle = '#DBA111';
+            ctx.beginPath();
+            ctx.arc(cx, cy, radius + 3, 0, Math.PI * 2);
+            ctx.fill();
+            _drawCircularPhoto(ctx, benchPhotos[i], cx, cy, radius, p.player_name);
+            // Mini rating badge
+            _drawRatingBadge(ctx, cx + radius - 2, cy - radius + 2, 18, ratingFor(p.player_id), fontDisp);
+            // Mini name
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 16px ' + fontBody;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+            ctx.fillText(_shortName(p.player_name, 10), cx, cy + radius + 8);
+        });
+    }
+
+    // ── Footer brand ──
+    ctx.fillStyle = '#DBA111';
+    ctx.font = 'bold 30px ' + fontDisp;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(t('share.card_brand'), 60, H - 50);
+
+    var footerRight = _formatMatchDate(poll.created_at);
+    if (footerRight) {
+        ctx.fillStyle = 'rgba(255,255,255,0.55)';
+        ctx.font = '22px ' + fontBody;
+        ctx.textAlign = 'right';
+        ctx.fillText(footerRight, W - 60, H - 50);
+    }
 
     return canvas;
 }
 
-async function shareResultCard(pollId) {
-    // New flow: open the variant picker, let the user pick A/B/C, then
-    // generate + share. Old single-variant generation is preserved as
-    // generateCardCommunityTop5 for callers that may still reference it.
-    return openShareCardPicker(pollId);
+/* ═══ Variant B — Player of the Match cover (1080 × 1920) ═══
+   Spec: dark navy with a single diagonal gold slash across the canvas,
+   one big hero player (the user's max-rated, not the community's),
+   surname only in HUGE Bebas Neue across the full width, ~200pt gold
+   rating, mini meta strip "vs Opponent · N round · 12 April", and the
+   user's nickname + chelsea-XXX id in the corner.                       */
+async function generateMVPCardB(pollId) {
+    var data = await _loadCardData(pollId);
+    if (!data || !data.results.length) return null;
+    await _loadFontsForCanvas();
+
+    var poll = data.poll || {};
+    var results = data.results;
+    var opponent = data.opponent_name || _extractOpponent(poll.title);
+    var myStats = data.my_stats || null;
+
+    // Hero pick: user's max-rated player. If the user hasn't voted at
+    // all, fall back to the community fan-MVP — keeps the card useful
+    // for browsing past matches you didn't vote on.
+    var byId = {};
+    results.forEach(function(r) { byId[r.player_id] = r; });
+    var hero = null, heroRating = null;
+    var myRatings = _pickRatings(data, pollId);
+    if (myRatings) {
+        var topId = null, topRating = -1;
+        Object.keys(myRatings).forEach(function(pid) {
+            var v = Number(myRatings[pid]);
+            if (v > topRating) { topRating = v; topId = pid; }
+        });
+        if (topId && byId[topId]) {
+            hero = byId[topId];
+            heroRating = topRating;
+        }
+    }
+    if (!hero) {
+        hero = results[0];
+        heroRating = hero.avg_rating;
+    }
+
+    var W = 1080, H = 1920;
+    var canvas = document.createElement('canvas');
+    canvas.width = W; canvas.height = H;
+    var ctx = canvas.getContext('2d');
+    var fontDisp  = '"Russo One", "Oswald", "Inter", -apple-system, sans-serif';
+    var fontHero  = '"Bebas Neue", "Oswald", "Russo One", "Inter", sans-serif';
+    var fontBody  = '"Inter", -apple-system, sans-serif';
+
+    // ── Backdrop: deep navy with a darker vignette ──
+    var bgGrad = ctx.createLinearGradient(0, 0, 0, H);
+    bgGrad.addColorStop(0, '#0a1628');
+    bgGrad.addColorStop(0.45, '#022d5c');
+    bgGrad.addColorStop(1, '#03091a');
+    ctx.fillStyle = bgGrad;
+    ctx.fillRect(0, 0, W, H);
+
+    // Soft radial vignette toward the corners.
+    var vignette = ctx.createRadialGradient(W / 2, H * 0.45, W * 0.3, W / 2, H * 0.45, W);
+    vignette.addColorStop(0, 'rgba(0,0,0,0)');
+    vignette.addColorStop(1, 'rgba(0,0,0,0.65)');
+    ctx.fillStyle = vignette;
+    ctx.fillRect(0, 0, W, H);
+
+    // ── The diagonal gold slash ──
+    _drawDiagonalGoldStripe(ctx, W, H, { thickness: 80, alpha: 0.92 });
+    _drawDiagonalGoldStripe(ctx, W, H, { thickness: 16, alpha: 0.55 });
+
+    // ── Top label: "PLAYER OF THE MATCH" ──
+    ctx.fillStyle = '#DBA111';
+    ctx.font = 'bold 56px ' + fontHero;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    // Bebas Neue + tracking — manual letter-spacing trick.
+    var label = t('share.card_mvp');
+    var trackedLabel = label.split('').join('\u2009');
+    ctx.fillText(trackedLabel, W / 2, 110);
+
+    ctx.strokeStyle = 'rgba(219,161,17,0.55)';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(W / 2 - 200, 195);
+    ctx.lineTo(W / 2 + 200, 195);
+    ctx.stroke();
+
+    // ── Hero photo ──
+    var photo = await _loadImageSafe(hero.photo_url);
+    var cx = W / 2, cy = 740, radius = 340;
+    // Gold glow ring
+    ctx.save();
+    ctx.shadowColor = 'rgba(219,161,17,0.65)';
+    ctx.shadowBlur = 90;
+    ctx.fillStyle = '#DBA111';
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius + 16, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    _drawCircularPhoto(ctx, photo, cx, cy, radius, hero.player_name);
+
+    // ── Surname headline ──
+    var surname = _surnameOf(hero.player_name).toUpperCase();
+    ctx.fillStyle = '#ffffff';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    var headSize = 230;
+    ctx.font = 'bold ' + headSize + 'px ' + fontHero;
+    while (ctx.measureText(surname).width > W - 100 && headSize > 80) {
+        headSize -= 8;
+        ctx.font = 'bold ' + headSize + 'px ' + fontHero;
+    }
+    var headlineY = 1130;
+    // Subtle text shadow for depth.
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.6)';
+    ctx.shadowBlur = 12;
+    ctx.shadowOffsetY = 4;
+    ctx.fillText(surname, W / 2, headlineY);
+    ctx.restore();
+
+    // ── Massive gold rating ──
+    var ratingText = (heroRating == null ? '–' : Number(heroRating).toFixed(1));
+    var ratingY = headlineY + headSize + 20;
+    ctx.fillStyle = '#DBA111';
+    ctx.font = 'bold 220px ' + fontHero;
+    // Halo behind the rating for separation from the dark background.
+    ctx.save();
+    ctx.shadowColor = 'rgba(219,161,17,0.6)';
+    ctx.shadowBlur = 35;
+    ctx.fillText(ratingText, W / 2, ratingY);
+    ctx.restore();
+
+    // ── Mini meta strip: "vs Opponent · N round · 12 April" ──
+    var metaParts = [];
+    if (opponent) metaParts.push(t('share.card_vs') + ' ' + opponent);
+    if (poll.round) metaParts.push(poll.round + ' ' + t('share.card_round'));
+    var dateLabel = _formatMatchDate(poll.created_at);
+    if (dateLabel) metaParts.push(dateLabel);
+    if (metaParts.length) {
+        ctx.fillStyle = 'rgba(255,255,255,0.78)';
+        ctx.font = '32px ' + fontBody;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.fillText(metaParts.join('  ·  '), W / 2, ratingY + 250);
+    }
+
+    // ── User signature (corner) ──
+    var sigY = H - 130;
+    ctx.fillStyle = '#DBA111';
+    ctx.font = 'bold 30px ' + fontDisp;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    var brand = t('share.card_brand');
+    ctx.fillText(brand, 60, sigY);
+
+    if (myStats) {
+        var nick = '';
+        if (myStats.username) nick = '@' + myStats.username;
+        else if (myStats.first_name) nick = myStats.first_name + (myStats.last_name ? ' ' + myStats.last_name : '');
+        var idLine = myStats.auto_id ? myStats.auto_id : '';
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 28px ' + fontBody;
+        ctx.textAlign = 'right';
+        if (nick) ctx.fillText(nick, W - 60, sigY - 18);
+        if (idLine) {
+            ctx.fillStyle = 'rgba(255,255,255,0.5)';
+            ctx.font = '22px ' + fontBody;
+            ctx.fillText(idLine, W - 60, sigY + 16);
+        }
+    }
+
+    return canvas;
 }
 
-function downloadBlob(blob) {
+/* ═══ Variant C — Stats card (1080 × 1920) ═══
+   Spec: vertical 9:16 for Stories. Top: user avatar + nickname,
+   yellow subtitle "Мои оценки vs Opponent", top-3 by user's ratings
+   in big rows (photo 80px + name + gold number), the remaining
+   players as compact rows, then a stat block "Угадал MVP / Streak /
+   XP for match", brand at the bottom.                                  */
+async function generateStatsCardC(pollId) {
+    var data = await _loadCardData(pollId);
+    if (!data || !data.results.length) return null;
+    await _loadFontsForCanvas();
+
+    var poll = data.poll || {};
+    var results = data.results;
+    var opponent = data.opponent_name || _extractOpponent(poll.title);
+    var myStats = data.my_stats || null;
+    var myRatings = _pickRatings(data, pollId);
+
+    // Build a sorted list of players by USER's rating. If we have no
+    // ratings at all, fall back to community avg so non-voters still
+    // see something meaningful.
+    var byId = {};
+    results.forEach(function(r) { byId[r.player_id] = r; });
+    var rated = results.map(function(r) {
+        var v = (myRatings && myRatings[r.player_id] != null)
+            ? Number(myRatings[r.player_id])
+            : (r.avg_rating != null ? Number(r.avg_rating) : null);
+        return { p: r, v: v == null || isNaN(v) ? -1 : v };
+    }).filter(function(x) { return x.v >= 0; });
+    rated.sort(function(a, b) { return b.v - a.v; });
+
+    var top3 = rated.slice(0, 3);
+    var others = rated.slice(3);
+
+    var W = 1080, H = 1920;
+    var canvas = document.createElement('canvas');
+    canvas.width = W; canvas.height = H;
+    var ctx = canvas.getContext('2d');
+    var fontDisp = '"Russo One", "Oswald", "Inter", -apple-system, sans-serif';
+    var fontBody = '"Inter", -apple-system, sans-serif';
+
+    // ── Background ──
+    var bgGrad = ctx.createLinearGradient(0, 0, 0, H);
+    bgGrad.addColorStop(0, '#022d5c');
+    bgGrad.addColorStop(0.55, '#034694');
+    bgGrad.addColorStop(1, '#0a1628');
+    ctx.fillStyle = bgGrad;
+    ctx.fillRect(0, 0, W, H);
+
+    // ── Header: user avatar + nickname ──
+    var avatarUrl = (myStats && myStats.avatar_url) || '';
+    if (!avatarUrl && tg && tg.initDataUnsafe && tg.initDataUnsafe.user) {
+        avatarUrl = tg.initDataUnsafe.user.photo_url || '';
+    }
+    var avatarPromise = _loadImageSafe(avatarUrl);
+
+    var top3Photos = await Promise.all(top3.map(function(x) {
+        return _loadImageSafe(x.p.photo_url);
+    }));
+    var avatarImg = await avatarPromise;
+
+    var headerY = 100;
+    var avatarRadius = 60;
+    var avatarCX = 100, avatarCY = headerY + avatarRadius;
+
+    // Avatar gold ring
+    ctx.fillStyle = '#DBA111';
+    ctx.beginPath();
+    ctx.arc(avatarCX, avatarCY, avatarRadius + 4, 0, Math.PI * 2);
+    ctx.fill();
+    var avatarLabel = (myStats && (myStats.first_name || myStats.username))
+        ? (myStats.first_name || myStats.username)
+        : (state.firstName || state.username || '?');
+    _drawCircularPhoto(ctx, avatarImg, avatarCX, avatarCY, avatarRadius, avatarLabel);
+
+    // Nickname + auto-id
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 44px ' + fontDisp;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    var nick = '';
+    if (myStats) {
+        if (myStats.username) nick = '@' + myStats.username;
+        else if (myStats.first_name) nick = myStats.first_name;
+    }
+    if (!nick) nick = '@' + (state.username || 'guest');
+    ctx.fillText(nick, avatarCX + avatarRadius + 30, headerY + 12);
+
+    if (myStats && myStats.auto_id) {
+        ctx.fillStyle = 'rgba(255,255,255,0.55)';
+        ctx.font = '28px ' + fontBody;
+        ctx.fillText(myStats.auto_id, avatarCX + avatarRadius + 30, headerY + 70);
+    }
+
+    // ── Subtitle: "Мои оценки vs Opponent" ──
+    ctx.fillStyle = '#DBA111';
+    ctx.font = 'bold 56px ' + fontDisp;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    var subtitle = t('share.card_my_ratings');
+    if (opponent) subtitle += ' ' + t('share.card_vs') + ' ' + opponent;
+    // Auto-shrink so long opponent names still fit on one line.
+    var subSize = 56;
+    while (ctx.measureText(subtitle).width > W - 120 && subSize > 32) {
+        subSize -= 4;
+        ctx.font = 'bold ' + subSize + 'px ' + fontDisp;
+    }
+    ctx.fillText(subtitle, 60, 270);
+
+    // ── Top-3 rows (chunky) ──
+    var top3Y = 380;
+    var top3RowH = 150;
+    top3.forEach(function(x, i) {
+        var p = x.p;
+        var rowY = top3Y + i * (top3RowH + 14);
+        var rowX = 60;
+        var rowW = W - 120;
+
+        // Row backdrop
+        ctx.fillStyle = i === 0 ? 'rgba(219,161,17,0.16)' : 'rgba(255,255,255,0.06)';
+        _roundRect(ctx, rowX, rowY, rowW, top3RowH, 22);
+        ctx.fill();
+        ctx.strokeStyle = i === 0 ? 'rgba(219,161,17,0.6)' : 'rgba(255,255,255,0.12)';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Photo
+        var photoR = 52;
+        var photoCX = rowX + 50 + photoR;
+        var photoCY = rowY + top3RowH / 2;
+        ctx.fillStyle = '#DBA111';
+        ctx.beginPath();
+        ctx.arc(photoCX, photoCY, photoR + 4, 0, Math.PI * 2);
+        ctx.fill();
+        _drawCircularPhoto(ctx, top3Photos[i], photoCX, photoCY, photoR, p.player_name);
+
+        // Rank pill
+        ctx.fillStyle = i === 0 ? '#DBA111' : (i === 1 ? '#c0c0c0' : '#cd7f32');
+        ctx.beginPath();
+        ctx.arc(photoCX - photoR + 5, photoCY + photoR - 5, 22, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#0a1628';
+        ctx.font = 'bold 26px ' + fontDisp;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(String(i + 1), photoCX - photoR + 5, photoCY + photoR - 5);
+
+        // Name
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 44px ' + fontDisp;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        var nm = _shortName(p.player_name, 18);
+        ctx.fillText(nm, photoCX + photoR + 30, photoCY - 12);
+        // Sub-line: position / number
+        if (p.position || p.number) {
+            ctx.fillStyle = 'rgba(255,255,255,0.5)';
+            ctx.font = '24px ' + fontBody;
+            var sub = [];
+            if (p.number) sub.push('#' + p.number);
+            if (p.position) sub.push(String(p.position).toUpperCase());
+            ctx.fillText(sub.join(' · '), photoCX + photoR + 30, photoCY + 28);
+        }
+
+        // Gold rating number on the right
+        ctx.fillStyle = '#DBA111';
+        ctx.font = 'bold 88px ' + fontDisp;
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(Number(x.v).toFixed(1), rowX + rowW - 30, photoCY);
+    });
+
+    // ── Others list ──
+    var othersStartY = top3Y + 3 * (top3RowH + 14) + 30;
+    if (others.length) {
+        ctx.fillStyle = 'rgba(255,255,255,0.55)';
+        ctx.font = 'bold 26px ' + fontDisp;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillText(t('share.card_others') + ' · ' + others.length, 60, othersStartY);
+
+        var listY = othersStartY + 50;
+        var rowH = 50;
+        var maxRows = Math.min(others.length, 9);
+        for (var i = 0; i < maxRows; i++) {
+            var x = others[i];
+            var y = listY + i * rowH;
+            // Row separator
+            if (i > 0) {
+                ctx.strokeStyle = 'rgba(255,255,255,0.07)';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(60, y);
+                ctx.lineTo(W - 60, y);
+                ctx.stroke();
+            }
+            ctx.fillStyle = 'rgba(255,255,255,0.4)';
+            ctx.font = 'bold 24px ' + fontDisp;
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(String(i + 4) + '.', 60, y + rowH / 2);
+
+            ctx.fillStyle = '#ffffff';
+            ctx.font = '28px ' + fontBody;
+            var name = _shortName(x.p.player_name, 24);
+            ctx.fillText(name, 110, y + rowH / 2);
+
+            ctx.fillStyle = '#DBA111';
+            ctx.font = 'bold 32px ' + fontDisp;
+            ctx.textAlign = 'right';
+            ctx.fillText(Number(x.v).toFixed(1), W - 60, y + rowH / 2);
+        }
+    }
+
+    // ── Stat block: guessed MVP / streak / XP per match ──
+    var blockY = H - 320;
+    ctx.fillStyle = 'rgba(255,255,255,0.07)';
+    _roundRect(ctx, 60, blockY, W - 120, 200, 22);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(219,161,17,0.4)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    var statCols = [];
+    if (myStats) {
+        statCols.push({
+            label: t('share.card_guessed_mvp'),
+            value: myStats.guessed_mvp ? '\u2713' : '\u2715',
+            highlight: myStats.guessed_mvp
+        });
+        statCols.push({
+            label: t('share.card_streak'),
+            value: String(myStats.streak || 0),
+            sub: t('share.card_streak_unit')
+        });
+        statCols.push({
+            label: t('share.card_xp_for_match'),
+            value: '+' + (myStats.xp_for_match || 0)
+        });
+    } else {
+        // Anonymous viewer of a poll — fill the block with poll meta
+        // instead of leaving it blank.
+        statCols.push({ label: t('share.card_voters'), value: String(data.total_voters || 0) });
+        var avg = 0, n = 0;
+        results.forEach(function(r) { if (typeof r.avg_rating === 'number') { avg += r.avg_rating; n++; } });
+        statCols.push({ label: t('share.card_avg_rating'), value: n ? (avg / n).toFixed(2) : '–' });
+    }
+
+    var colW = (W - 120) / statCols.length;
+    statCols.forEach(function(s, i) {
+        var cx = 60 + colW * (i + 0.5);
+        ctx.fillStyle = s.highlight === false ? '#cc4444' : '#DBA111';
+        ctx.font = 'bold 72px ' + fontDisp;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(s.value, cx, blockY + 70);
+
+        ctx.fillStyle = 'rgba(255,255,255,0.7)';
+        ctx.font = '22px ' + fontBody;
+        ctx.fillText(s.label, cx, blockY + 130);
+        if (s.sub) {
+            ctx.fillStyle = 'rgba(255,255,255,0.4)';
+            ctx.font = '18px ' + fontBody;
+            ctx.fillText(s.sub, cx, blockY + 160);
+        }
+    });
+
+    // ── Footer brand ──
+    ctx.fillStyle = '#DBA111';
+    ctx.font = 'bold 32px ' + fontDisp;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(t('share.card_brand'), W / 2, H - 60);
+
+    return canvas;
+}
+
+/* ═══ Modal: open / close / variant tiles ═══ */
+
+function openShareModal(pollId) {
+    var modal = document.getElementById('share-modal');
+    if (!modal) return;
+    var titleEl = document.getElementById('share-modal-title');
+    if (titleEl) titleEl.textContent = t('share.choose_variant');
+
+    var container = document.getElementById('share-modal-variants');
+    container.innerHTML = '';
+
+    var variants = [
+        {
+            id: 'A',
+            title: t('share.variant_a_title'),
+            desc:  t('share.variant_a_desc'),
+            preview: _previewSvgA(),
+            run: generateLineupCardA,
+            filename: 'chelsea-lineup'
+        },
+        {
+            id: 'B',
+            title: t('share.variant_b_title'),
+            desc:  t('share.variant_b_desc'),
+            preview: _previewSvgB(),
+            run: generateMVPCardB,
+            filename: 'chelsea-mvp'
+        },
+        {
+            id: 'C',
+            title: t('share.variant_c_title'),
+            desc:  t('share.variant_c_desc'),
+            preview: _previewSvgC(),
+            run: generateStatsCardC,
+            filename: 'chelsea-stats'
+        }
+    ];
+
+    variants.forEach(function(v) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'share-variant-card';
+        btn.setAttribute('aria-label', v.title);
+        btn.innerHTML =
+            '<div class="share-variant-preview">' + v.preview + '</div>' +
+            '<div class="share-variant-text">' +
+                '<div class="share-variant-title">' + escapeHtml(v.title) + '</div>' +
+                '<div class="share-variant-desc">' + escapeHtml(v.desc) + '</div>' +
+            '</div>';
+        btn.addEventListener('click', async function() {
+            // Disable every tile while we generate to prevent double-clicks.
+            container.querySelectorAll('.share-variant-card').forEach(function(b) { b.setAttribute('disabled', ''); });
+            // Cards are built from the user's own ratings — refuse early
+            // if we know the user hasn't voted on this poll. We probe
+            // via state.currentPoll first (cheap), and as a soft check
+            // before generation we also rely on the data fetch's my_stats.
+            var sameAsCurrent = state.currentPoll && state.currentPoll.poll_id === pollId;
+            if (sameAsCurrent && state.hasVoted === false && (!state.myRatings || !Object.keys(state.myRatings).length)) {
+                toast(t('share.no_user_votes'));
+                container.querySelectorAll('.share-variant-card').forEach(function(b) { b.removeAttribute('disabled'); });
+                return;
+            }
+            toast(t('share.generating'));
+            try {
+                var canvas = await v.run(pollId);
+                if (!canvas) {
+                    toast(t('share.no_data'));
+                    container.querySelectorAll('.share-variant-card').forEach(function(b) { b.removeAttribute('disabled'); });
+                    return;
+                }
+                closeShareModal();
+                shareCanvas(canvas, v.filename + '.png');
+            } catch (e) {
+                console.error('share card generation failed', e);
+                toast(t('common.error'));
+                container.querySelectorAll('.share-variant-card').forEach(function(b) { b.removeAttribute('disabled'); });
+            }
+        });
+        container.appendChild(btn);
+    });
+
+    modal.style.display = 'flex';
+    // Lock background scroll while the modal is up.
+    document.body.style.overflow = 'hidden';
+}
+
+function closeShareModal() {
+    var modal = document.getElementById('share-modal');
+    if (!modal) return;
+    modal.style.display = 'none';
+    document.body.style.overflow = '';
+}
+
+/* Tiny inline SVGs used as the modal-tile previews. Inline SVG keeps
+   the bundle one fewer request and lets the previews inherit the
+   brand palette via fill.                                              */
+function _previewSvgA() {
+    return '<svg viewBox="0 0 80 100" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
+        '<defs><linearGradient id="bgA" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#022d5c"/><stop offset="0.6" stop-color="#034694"/><stop offset="1" stop-color="#0a1628"/></linearGradient></defs>' +
+        '<rect x="2" y="2" width="76" height="96" rx="6" fill="url(#bgA)"/>' +
+        // Crest top-left
+        '<path d="M 4 8 L 14 8 L 14 14 Q 14 18 9 18 Q 4 18 4 14 Z" fill="#DBA111"/>' +
+        '<text x="9" y="14.5" text-anchor="middle" font-size="6" font-weight="700" fill="#022d5c" font-family="sans-serif">C</text>' +
+        // "vs ..." headline
+        '<rect x="20" y="9" width="40" height="3.5" rx="1" fill="#fff"/>' +
+        // Pitch
+        '<rect x="6" y="22" width="68" height="58" rx="3" fill="#0e6b2c"/>' +
+        '<line x1="6" y1="51" x2="74" y2="51" stroke="rgba(255,255,255,0.3)" stroke-width="0.5"/>' +
+        '<circle cx="40" cy="51" r="6" fill="none" stroke="rgba(255,255,255,0.3)" stroke-width="0.5"/>' +
+        // 4-3-3 dots
+        '<circle cx="20" cy="30" r="3" fill="#DBA111"/><circle cx="40" cy="30" r="3" fill="#DBA111"/><circle cx="60" cy="30" r="3" fill="#DBA111"/>' +
+        '<circle cx="22" cy="46" r="3" fill="#DBA111"/><circle cx="40" cy="46" r="3" fill="#DBA111"/><circle cx="58" cy="46" r="3" fill="#DBA111"/>' +
+        '<circle cx="14" cy="62" r="3" fill="#DBA111"/><circle cx="32" cy="62" r="3" fill="#DBA111"/><circle cx="48" cy="62" r="3" fill="#DBA111"/><circle cx="66" cy="62" r="3" fill="#DBA111"/>' +
+        '<circle cx="40" cy="74" r="3" fill="#DBA111"/>' +
+        // Bench strip
+        '<rect x="6" y="84" width="68" height="10" rx="2" fill="rgba(255,255,255,0.08)"/>' +
+        '<circle cx="14" cy="89" r="2.5" fill="#DBA111"/><circle cx="22" cy="89" r="2.5" fill="#DBA111"/><circle cx="30" cy="89" r="2.5" fill="#DBA111"/><circle cx="38" cy="89" r="2.5" fill="#DBA111"/><circle cx="46" cy="89" r="2.5" fill="#DBA111"/><circle cx="54" cy="89" r="2.5" fill="#DBA111"/><circle cx="62" cy="89" r="2.5" fill="#DBA111"/>' +
+        '</svg>';
+}
+function _previewSvgB() {
+    return '<svg viewBox="0 0 80 100" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
+        '<defs><linearGradient id="bgB" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#0a1628"/><stop offset="0.5" stop-color="#022d5c"/><stop offset="1" stop-color="#03091a"/></linearGradient></defs>' +
+        '<rect x="2" y="2" width="76" height="96" rx="6" fill="url(#bgB)"/>' +
+        // Diagonal gold stripe
+        '<rect x="-20" y="40" width="120" height="6" fill="#DBA111" transform="rotate(-25 40 50)" opacity="0.85"/>' +
+        // PLAYER OF THE MATCH
+        '<text x="40" y="14" text-anchor="middle" font-size="3.6" font-weight="700" fill="#DBA111" font-family="sans-serif" letter-spacing="0.5">PLAYER OF THE MATCH</text>' +
+        // Hero circle
+        '<circle cx="40" cy="42" r="14" fill="#DBA111"/>' +
+        '<circle cx="40" cy="42" r="11.5" fill="#0563c1"/>' +
+        // Surname
+        '<rect x="10" y="64" width="60" height="8" rx="1" fill="#fff"/>' +
+        // Big rating
+        '<text x="40" y="88" text-anchor="middle" font-size="14" font-weight="700" fill="#DBA111" font-family="sans-serif">9.5</text>' +
+        '</svg>';
+}
+function _previewSvgC() {
+    return '<svg viewBox="0 0 80 100" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
+        '<rect x="20" y="2" width="40" height="96" rx="4" fill="#022d5c"/>' +
+        // User avatar + nick
+        '<circle cx="26" cy="9" r="3" fill="#DBA111"/>' +
+        '<rect x="32" y="7" width="22" height="2.5" rx="0.5" fill="#fff"/>' +
+        '<rect x="32" y="11" width="14" height="1.6" rx="0.3" fill="rgba(255,255,255,0.5)"/>' +
+        // Subtitle
+        '<rect x="22" y="17" width="36" height="2.5" rx="0.5" fill="#DBA111"/>' +
+        // Top-3 rows
+        '<rect x="22" y="22" width="36" height="9" rx="2" fill="rgba(219,161,17,0.18)"/>' +
+        '<circle cx="27" cy="26.5" r="3" fill="#DBA111"/>' +
+        '<text x="55" y="29" text-anchor="end" font-size="5" font-weight="700" fill="#DBA111" font-family="sans-serif">9.5</text>' +
+        '<rect x="22" y="32" width="36" height="9" rx="2" fill="rgba(255,255,255,0.06)"/>' +
+        '<circle cx="27" cy="36.5" r="3" fill="#c0c0c0"/>' +
+        '<rect x="22" y="42" width="36" height="9" rx="2" fill="rgba(255,255,255,0.06)"/>' +
+        '<circle cx="27" cy="46.5" r="3" fill="#cd7f32"/>' +
+        // Others list
+        '<rect x="22" y="54" width="36" height="1.5" rx="0.4" fill="rgba(255,255,255,0.3)"/>' +
+        '<rect x="22" y="58" width="36" height="1.5" rx="0.4" fill="rgba(255,255,255,0.2)"/>' +
+        '<rect x="22" y="62" width="36" height="1.5" rx="0.4" fill="rgba(255,255,255,0.2)"/>' +
+        '<rect x="22" y="66" width="36" height="1.5" rx="0.4" fill="rgba(255,255,255,0.2)"/>' +
+        // Stat block
+        '<rect x="22" y="76" width="36" height="14" rx="2" fill="rgba(255,255,255,0.08)" stroke="rgba(219,161,17,0.4)" stroke-width="0.4"/>' +
+        '<text x="29" y="84" text-anchor="middle" font-size="4" font-weight="700" fill="#DBA111" font-family="sans-serif">\u2713</text>' +
+        '<text x="40" y="84" text-anchor="middle" font-size="4" font-weight="700" fill="#DBA111" font-family="sans-serif">7</text>' +
+        '<text x="51" y="84" text-anchor="middle" font-size="4" font-weight="700" fill="#DBA111" font-family="sans-serif">+120</text>' +
+        // Brand
+        '<text x="40" y="96" text-anchor="middle" font-size="3" font-weight="700" fill="#DBA111" font-family="sans-serif">@ChelseaVotingBot</text>' +
+        '</svg>';
+}
+
+/* ═══ Unified share pipeline ═══
+   Telegram's WebApp.shareToStory expects a publicly-reachable media URL,
+   not a Blob — so we can only call it when an external uploader is in
+   place. When that endpoint exists (window.UPLOAD_SHARE_IMAGE_URL is
+   defined and shareToStory is available), we upload first and pass the
+   returned URL. Otherwise we fall back to the platform Web Share API
+   (which on iOS/Android Telegram surfaces "Add to Story" in the system
+   share sheet) and finally to a plain PNG download.                    */
+async function shareCanvas(canvas, filename) {
+    var blob = await new Promise(function(resolve) {
+        canvas.toBlob(function(b) { resolve(b); }, 'image/png', 0.95);
+    });
+    if (!blob) { toast(t('common.error')); return; }
+
+    // 1) Telegram-native shareToStory (only viable with a public URL).
+    try {
+        if (tg && typeof tg.shareToStory === 'function' && typeof window.UPLOAD_SHARE_IMAGE_URL === 'string') {
+            var fd = new FormData();
+            fd.append('image', blob, filename);
+            var resp = await fetch(window.UPLOAD_SHARE_IMAGE_URL, { method: 'POST', body: fd });
+            if (resp.ok) {
+                var json = await resp.json();
+                if (json && json.url) {
+                    tg.shareToStory(json.url, { text: t('share.card_brand') });
+                    toast(t('share.card_ready'));
+                    return;
+                }
+            }
+        }
+    } catch (e) { /* fall through */ }
+
+    // 2) Web Share API with files — Telegram in-app browser supports this.
+    try {
+        if (navigator.share && typeof File !== 'undefined') {
+            var file = new File([blob], filename, { type: 'image/png' });
+            var shareData = { files: [file], title: t('share.card_brand') };
+            if (!navigator.canShare || navigator.canShare(shareData)) {
+                await navigator.share(shareData);
+                toast(t('share.card_ready'));
+                return;
+            }
+        }
+    } catch (e) {
+        // User cancelled or browser refused → fall through to download.
+        if (e && e.name === 'AbortError') return;
+    }
+
+    // 3) Last-resort: download the PNG so the user can post it manually.
     var url = URL.createObjectURL(blob);
     var a = document.createElement('a');
     a.href = url;
-    a.download = 'chelsea-results.png';
+    a.download = filename;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -3493,711 +4641,3 @@ window.addEventListener('load', function () {
         }
     }, { passive: true });
 })();
-
-
-
-/* ═════════════════════════════════════════════════════════════════
-   Share Card — three canvas-rendered variants
-   ─────────────────────────────────────────────────────────────────
-   The user opens a picker modal that thumbnails all three variants,
-   picks one, then sees a full-size preview with Share / Download.
-
-   Variants:
-     A: Lineup formation         1080×1080  — pitch + all players + my ratings
-     B: MVP Cover                1080×1080  — single hero player, magazine cover
-     C: Stats Vertical (9:16)    1080×1920  — stories-format with top 3 + stats
-
-   Data is fetched once via /api/share/<poll_id>, then all renders draw
-   from the same payload. Player photos are loaded with CORS=anonymous;
-   if a load fails (CORS rejection / 404) we fall back to a colored
-   circle with the player's initials so the card never breaks.
-   ═════════════════════════════════════════════════════════════════ */
-
-var SHARE_BG = '#022d5c';
-var SHARE_BG_DEEP = '#0a1628';
-var SHARE_BLUE = '#034694';
-var SHARE_BLUE_LIGHT = '#0563c1';
-var SHARE_GOLD = '#DBA111';
-var SHARE_GOLD_LIGHT = '#f0c040';
-
-function _shareDisplayFont(weight) {
-    // The mini-app body may be rendering with a Google-Fonts preset
-    // (Russo One / Oswald / Manrope) but the share canvas is captured
-    // as pixels — we want a stable, system-available font that's bold
-    // and Cyrillic-friendly. Using 'Impact' as the lead with safe
-    // fallbacks keeps the export consistent across devices.
-    var w = weight || 800;
-    return w + ' ${px}px Impact, "Arial Black", "Helvetica Neue", sans-serif';
-}
-function _shareBodyFont(weight, italic) {
-    var w = weight || 600;
-    var i = italic ? 'italic ' : '';
-    return i + w + ' ${px}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
-}
-
-// Tiny string-template helper to avoid sprinkling .replace('${px}', ...)
-// at every callsite. Pass a template returned by _shareDisplayFont/etc
-// and the desired pixel size, get a font shorthand back.
-function _font(template, px) { return template.replace('${px}', String(px)); }
-
-function _initials(name) {
-    if (!name) return '?';
-    var parts = String(name).trim().split(/\s+/);
-    var s = parts[0][0] || '?';
-    if (parts.length > 1) s += parts[parts.length - 1][0] || '';
-    return s.toUpperCase();
-}
-
-function _loadImage(url) {
-    // Load with CORS so the resulting canvas isn't tainted (toBlob would
-    // throw SecurityError otherwise). On failure (CORS missing / 404 /
-    // network) the promise rejects and the caller draws a placeholder.
-    return new Promise(function (resolve, reject) {
-        if (!url) return reject(new Error('no url'));
-        var img = new Image();
-        img.crossOrigin = 'anonymous';
-        img.onload = function () { resolve(img); };
-        img.onerror = function () { reject(new Error('image failed')); };
-        img.src = url;
-    });
-}
-
-function _roundRect(ctx, x, y, w, h, r) {
-    var rr = Math.min(r, w / 2, h / 2);
-    ctx.beginPath();
-    ctx.moveTo(x + rr, y);
-    ctx.arcTo(x + w, y,     x + w, y + h, rr);
-    ctx.arcTo(x + w, y + h, x,     y + h, rr);
-    ctx.arcTo(x,     y + h, x,     y,     rr);
-    ctx.arcTo(x,     y,     x + w, y,     rr);
-    ctx.closePath();
-}
-
-function _drawPlayerPhoto(ctx, img, x, y, size, opts) {
-    // Square photo with rounded corners. opts.desaturate=true draws as
-    // grayscale (variant A's monochrome roster look). opts.fallbackName
-    // picks the placeholder initials if we never got the image.
-    opts = opts || {};
-    var radius = opts.radius != null ? opts.radius : Math.round(size * 0.12);
-    ctx.save();
-    _roundRect(ctx, x, y, size, size, radius);
-    ctx.clip();
-    if (img) {
-        if (opts.desaturate) {
-            ctx.filter = 'grayscale(100%) contrast(1.1)';
-        }
-        // Cover-fit: scale up & crop center.
-        var iw = img.naturalWidth, ih = img.naturalHeight;
-        var scale = Math.max(size / iw, size / ih);
-        var sw = size / scale, sh = size / scale;
-        var sx = (iw - sw) / 2, sy = (ih - sh) / 2;
-        ctx.drawImage(img, sx, sy, sw, sh, x, y, size, size);
-        ctx.filter = 'none';
-    } else {
-        // Placeholder: gradient + initials.
-        var grad = ctx.createLinearGradient(x, y, x + size, y + size);
-        grad.addColorStop(0, SHARE_BLUE);
-        grad.addColorStop(1, SHARE_BLUE_LIGHT);
-        ctx.fillStyle = grad;
-        ctx.fillRect(x, y, size, size);
-        ctx.fillStyle = '#fff';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.font = _font(_shareDisplayFont(800), Math.round(size * 0.4));
-        ctx.fillText(_initials(opts.fallbackName), x + size / 2, y + size / 2);
-    }
-    ctx.restore();
-}
-
-function _drawAvatarCircle(ctx, img, cx, cy, radius, opts) {
-    opts = opts || {};
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-    ctx.clip();
-    if (img) {
-        var iw = img.naturalWidth, ih = img.naturalHeight;
-        var scale = Math.max((radius * 2) / iw, (radius * 2) / ih);
-        var sw = (radius * 2) / scale, sh = (radius * 2) / scale;
-        var sx = (iw - sw) / 2, sy = (ih - sh) / 2;
-        ctx.drawImage(img, sx, sy, sw, sh, cx - radius, cy - radius, radius * 2, radius * 2);
-    } else {
-        var grad = ctx.createLinearGradient(cx - radius, cy - radius, cx + radius, cy + radius);
-        grad.addColorStop(0, SHARE_BLUE);
-        grad.addColorStop(1, SHARE_GOLD);
-        ctx.fillStyle = grad;
-        ctx.fillRect(cx - radius, cy - radius, radius * 2, radius * 2);
-        ctx.fillStyle = '#fff';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.font = _font(_shareDisplayFont(800), Math.round(radius * 0.7));
-        ctx.fillText(_initials(opts.fallbackName), cx, cy);
-    }
-    ctx.restore();
-    // Gold ring
-    ctx.strokeStyle = opts.ringColor || SHARE_GOLD;
-    ctx.lineWidth = opts.ringWidth || Math.max(3, radius * 0.06);
-    ctx.beginPath();
-    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-    ctx.stroke();
-}
-
-function _drawRatingBubble(ctx, cx, cy, radius, value) {
-    // Gold-filled circle with the rating number (e.g. "9.5"). Used in
-    // the lineup variant next to each player and in the MVP cover.
-    var grad = ctx.createRadialGradient(cx - radius * 0.3, cy - radius * 0.3, 0, cx, cy, radius);
-    grad.addColorStop(0, SHARE_GOLD_LIGHT);
-    grad.addColorStop(1, SHARE_GOLD);
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#0a1628';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    var label = (value == null || isNaN(value)) ? '—' : (Number(value) % 1 === 0 ? String(value) : Number(value).toFixed(1));
-    ctx.font = _font(_shareDisplayFont(800), Math.round(radius * 1.05));
-    ctx.fillText(label, cx, cy + radius * 0.05);
-}
-
-/* ── Formation layout for variant A ────────────────────────────────
-   Picks normalized positions (0..1 in x and y) for up to 11 starters.
-   Falls back to 3-row distribution if formation can't be inferred.
-   Returns an array of {x: 0..1, y: 0..1} the same length as `starters`.
-*/
-function _computeFormation(starters) {
-    var n = starters.length;
-    if (n === 0) return [];
-    // Recognize common shapes by count buckets if positions are unknown:
-    // n=11 → 4-3-3 default, n=10 fallback to 4-4-2-ish minus one, etc.
-    // We tag each starter by position prefix when available.
-    var rows = { GK: [], DEF: [], MID: [], FWD: [] };
-    var unknown = [];
-    starters.forEach(function (p) {
-        var pos = (p.position || '').toUpperCase();
-        if (pos.indexOf('GK') === 0 || pos === 'G' || pos === 'GOAL') rows.GK.push(p);
-        else if (pos.indexOf('D') === 0 || pos.indexOf('CB') === 0 || pos.indexOf('LB') === 0 || pos.indexOf('RB') === 0 || pos.indexOf('FB') === 0 || pos === 'WB') rows.DEF.push(p);
-        else if (pos.indexOf('M') === 0 || pos === 'CDM' || pos === 'CAM') rows.MID.push(p);
-        else if (pos.indexOf('F') === 0 || pos.indexOf('W') === 0 || pos === 'ST' || pos === 'CF') rows.FWD.push(p);
-        else unknown.push(p);
-    });
-    // If positions weren't tagged at all, use jersey numbers as a hint
-    // (1 = GK, 2-5 def-ish, etc). Otherwise distribute unknowns into MID.
-    if (rows.GK.length + rows.DEF.length + rows.MID.length + rows.FWD.length < 4) {
-        return _formationFromCount(starters);
-    }
-    unknown.forEach(function (p) { rows.MID.push(p); });
-    // Assemble row-by-row, top to bottom. Top of canvas = forwards
-    // (attacking direction up, which mirrors the user's example).
-    var pos = [];
-    var rowDefs = [
-        { players: rows.FWD, y: 0.18 },
-        { players: rows.MID, y: 0.45 },
-        { players: rows.DEF, y: 0.72 },
-        { players: rows.GK,  y: 0.92 },
-    ];
-    rowDefs.forEach(function (r) {
-        var k = r.players.length;
-        if (k === 0) return;
-        for (var i = 0; i < k; i++) {
-            var x = (k === 1) ? 0.5 : (0.12 + (i / (k - 1)) * 0.76);
-            pos.push({ player: r.players[i], x: x, y: r.y });
-        }
-    });
-    return pos;
-}
-
-function _formationFromCount(starters) {
-    // Fallback: just split into three rows by index. Not realistic but
-    // looks fine if positional data is missing entirely.
-    var pos = [];
-    var n = starters.length;
-    var rows = [Math.ceil(n / 3), Math.ceil(n / 3), n - 2 * Math.ceil(n / 3)];
-    var ys = [0.22, 0.5, 0.78];
-    var idx = 0;
-    for (var r = 0; r < 3; r++) {
-        var k = rows[r];
-        for (var i = 0; i < k; i++) {
-            var x = (k === 1) ? 0.5 : (0.12 + (i / (k - 1)) * 0.76);
-            pos.push({ player: starters[idx++], x: x, y: ys[r] });
-            if (idx >= n) break;
-        }
-        if (idx >= n) break;
-    }
-    return pos;
-}
-
-/* ── Variant A: Lineup ─────────────────────────────────────────── */
-async function drawCardLineup(ctx, data, W, H) {
-    var lineup = (data.lineup || []).slice();
-    var starters = lineup.filter(function (p) { return p.is_starter; });
-    var subs = lineup.filter(function (p) { return !p.is_starter; }).slice(0, 5);
-
-    // Background — chelsea blue, slightly darker at the top
-    var grad = ctx.createLinearGradient(0, 0, 0, H);
-    grad.addColorStop(0, '#0a1f4d');
-    grad.addColorStop(1, '#062052');
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, W, H);
-
-    // Pitch lines (subtle, like the example image)
-    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
-    ctx.lineWidth = 2;
-    var px = 60, py = 200, pw = W - 120, ph = H - 380;
-    ctx.strokeRect(px, py, pw, ph);
-    // Center circle
-    ctx.beginPath();
-    ctx.arc(W / 2, py + ph / 2, 110, 0, Math.PI * 2);
-    ctx.stroke();
-    // Center line
-    ctx.beginPath();
-    ctx.moveTo(px, py + ph / 2);
-    ctx.lineTo(px + pw, py + ph / 2);
-    ctx.stroke();
-    // Penalty boxes
-    ctx.strokeRect(px + pw * 0.2, py, pw * 0.6, 100);
-    ctx.strokeRect(px + pw * 0.2, py + ph - 100, pw * 0.6, 100);
-
-    // Header strip
-    ctx.fillStyle = '#fff';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'top';
-    ctx.font = _font(_shareDisplayFont(800), 96);
-    ctx.fillText('ЧЕЛСИ', 60, 40);
-    // vs Opponent + tour + date (parsed from poll.title best-effort)
-    var titleText = (data.poll && data.poll.title) || '';
-    ctx.fillStyle = '#fff';
-    ctx.font = _font(_shareBodyFont(700), 30);
-    ctx.fillText(titleText.slice(0, 38), 60, 145);
-
-    // Brand bug top right
-    ctx.fillStyle = SHARE_GOLD;
-    ctx.beginPath();
-    ctx.arc(W - 90, 90, 50, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#0a1628';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.font = _font(_shareDisplayFont(800), 56);
-    ctx.fillText('CFC', W - 90, 92);
-
-    // Preload all photos in parallel; use null for any that fail.
-    var allPlayers = starters.concat(subs);
-    var imgs = await Promise.all(allPlayers.map(function (p) {
-        return _loadImage(p.photo_url).catch(function () { return null; });
-    }));
-    var imgFor = {};
-    allPlayers.forEach(function (p, i) { imgFor[p.player_id] = imgs[i]; });
-
-    // Place starters on the pitch
-    var positions = _computeFormation(starters);
-    var photoSize = 130;
-    positions.forEach(function (slot) {
-        var p = slot.player;
-        var cx = px + slot.x * pw;
-        var cy = py + slot.y * ph;
-        var x = cx - photoSize / 2;
-        var y = cy - photoSize / 2;
-        _drawPlayerPhoto(ctx, imgFor[p.player_id], x, y, photoSize, {
-            desaturate: true, radius: 18, fallbackName: p.name,
-        });
-        // My rating bubble (top-right of photo) — only if voted
-        if (p.my_rating != null) {
-            _drawRatingBubble(ctx, x + photoSize - 14, y + 14, 32, p.my_rating);
-        } else if (p.number != null) {
-            // No rating → show jersey number instead
-            ctx.fillStyle = '#fff';
-            ctx.beginPath();
-            ctx.arc(x + photoSize - 14, y + 14, 26, 0, Math.PI * 2);
-            ctx.fill();
-            ctx.fillStyle = SHARE_BLUE;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.font = _font(_shareDisplayFont(800), 28);
-            ctx.fillText(String(p.number), x + photoSize - 14, y + 16);
-        }
-        // Name underneath
-        ctx.fillStyle = '#fff';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'top';
-        ctx.font = _font(_shareBodyFont(700), 24);
-        var nm = p.name || '';
-        if (nm.length > 14) nm = nm.slice(0, 13) + '…';
-        ctx.fillText(nm, cx, y + photoSize + 8);
-    });
-
-    // Subs strip
-    var subY = H - 150;
-    ctx.fillStyle = 'rgba(255,255,255,0.85)';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.font = _font(_shareDisplayFont(800), 28);
-    ctx.fillText('ЗАМЕНЫ', 60, subY - 60);
-    var subSize = 90;
-    var subSpacing = 110;
-    var subStartX = 60;
-    subs.forEach(function (p, i) {
-        var x = subStartX + i * subSpacing;
-        var y = subY - subSize / 2;
-        _drawPlayerPhoto(ctx, imgFor[p.player_id], x, y, subSize, {
-            desaturate: true, radius: 12, fallbackName: p.name,
-        });
-        if (p.my_rating != null) {
-            _drawRatingBubble(ctx, x + subSize - 8, y + 8, 22, p.my_rating);
-        }
-        ctx.fillStyle = '#fff';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'top';
-        ctx.font = _font(_shareBodyFont(700), 18);
-        var nm = (p.name || '').split(' ').pop();
-        if (nm.length > 10) nm = nm.slice(0, 9) + '…';
-        ctx.fillText(nm, x + subSize / 2, y + subSize + 4);
-    });
-
-    // Brand mark bottom right
-    ctx.fillStyle = SHARE_GOLD;
-    ctx.textAlign = 'right';
-    ctx.textBaseline = 'bottom';
-    ctx.font = _font(_shareBodyFont(700), 22);
-    ctx.fillText('@ChelseaVotingBot', W - 60, H - 50);
-}
-
-/* ── Variant B: MVP Cover ──────────────────────────────────────── */
-async function drawCardMvp(ctx, data, W, H) {
-    var lineup = data.lineup || [];
-    // MVP = the player I rated highest. Tie-break: community rank.
-    var rated = lineup.filter(function (p) { return p.my_rating != null; });
-    rated.sort(function (a, b) {
-        if (b.my_rating !== a.my_rating) return b.my_rating - a.my_rating;
-        return (a.community_rank || 999) - (b.community_rank || 999);
-    });
-    var mvp = rated[0] || lineup[0] || {};
-    var maxRating = data.max_rating || 10;
-
-    // Deep blue base + diagonal gold stripe
-    ctx.fillStyle = '#020e2c';
-    ctx.fillRect(0, 0, W, H);
-    var stripGrad = ctx.createLinearGradient(0, 0, W, H);
-    stripGrad.addColorStop(0, '#0a2c70');
-    stripGrad.addColorStop(0.55, '#0a1f4d');
-    stripGrad.addColorStop(1, '#020e2c');
-    ctx.fillStyle = stripGrad;
-    ctx.fillRect(0, 0, W, H);
-
-    // Gold diagonal accent
-    ctx.save();
-    ctx.translate(W * 0.55, H * 0.5);
-    ctx.rotate(-0.4);
-    var stripeGrad = ctx.createLinearGradient(-W, 0, W, 0);
-    stripeGrad.addColorStop(0, 'rgba(219,161,17,0)');
-    stripeGrad.addColorStop(0.5, 'rgba(219,161,17,0.4)');
-    stripeGrad.addColorStop(1, 'rgba(219,161,17,0)');
-    ctx.fillStyle = stripeGrad;
-    ctx.fillRect(-W, -60, 2 * W, 120);
-    ctx.restore();
-
-    // Player photo: large square on the right
-    var photoSize = Math.round(H * 0.62);
-    var photoX = W - photoSize - 60;
-    var photoY = (H - photoSize) / 2 + 40;
-    var img = null;
-    try { img = await _loadImage(mvp.photo_url); } catch (e) { img = null; }
-    _drawPlayerPhoto(ctx, img, photoX, photoY, photoSize, {
-        desaturate: true, radius: 24, fallbackName: mvp.name,
-    });
-    // Outer gold border on photo
-    ctx.strokeStyle = SHARE_GOLD;
-    ctx.lineWidth = 6;
-    _roundRect(ctx, photoX, photoY, photoSize, photoSize, 24);
-    ctx.stroke();
-
-    // Left-side typography stack
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'top';
-    // "MVP" small label
-    ctx.fillStyle = SHARE_GOLD;
-    ctx.font = _font(_shareDisplayFont(800), 36);
-    ctx.fillText('MVP МАТЧА', 60, 100);
-    // Surname HUGE (split on whitespace, take last token)
-    var surname = ((mvp.name || '').trim().split(/\s+/).pop() || '—').toUpperCase();
-    var nameSize = 200;
-    if (surname.length > 8) nameSize = 160;
-    if (surname.length > 11) nameSize = 130;
-    if (surname.length > 14) nameSize = 110;
-    ctx.fillStyle = '#fff';
-    ctx.font = _font(_shareDisplayFont(900), nameSize);
-    ctx.fillText(surname, 60, 150);
-    // Rating MASSIVE in gold
-    ctx.fillStyle = SHARE_GOLD;
-    ctx.font = _font(_shareDisplayFont(900), 320);
-    var ratingLabel = (mvp.my_rating == null) ? '—' :
-        (Number(mvp.my_rating) % 1 === 0 ? String(mvp.my_rating) : Number(mvp.my_rating).toFixed(1));
-    ctx.fillText(ratingLabel, 60, 380);
-    // /max-rating below the rating
-    ctx.fillStyle = 'rgba(255,255,255,0.5)';
-    ctx.font = _font(_shareDisplayFont(700), 60);
-    var rWidth = ctx.measureText(ratingLabel).width;
-    ctx.fillText(' / ' + maxRating, 60 + rWidth, 540);
-
-    // Match strip
-    ctx.fillStyle = 'rgba(255,255,255,0.7)';
-    ctx.font = _font(_shareBodyFont(600), 30);
-    var titleText = (data.poll && data.poll.title) || '';
-    ctx.fillText('Челси ' + (titleText.slice(0, 36)), 60, 760);
-
-    // Bottom-left: my mini avatar + handle
-    var stats = data.my || {};
-    var avatarImg = null;
-    try { avatarImg = await _loadImage(stats.telegram_photo_url); } catch (e) { avatarImg = null; }
-    _drawAvatarCircle(ctx, avatarImg, 110, H - 100, 50, {
-        fallbackName: (stats.first_name || '') + ' ' + (stats.last_name || ''),
-        ringColor: SHARE_GOLD, ringWidth: 4,
-    });
-    var handleParts = [];
-    if (stats.username) handleParts.push('@' + stats.username);
-    var idStr = stats.custom_id || stats.auto_id;
-    if (idStr) handleParts.push(idStr);
-    ctx.fillStyle = '#fff';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.font = _font(_shareBodyFont(700), 28);
-    ctx.fillText(handleParts.join('  •  '), 180, H - 100);
-
-    // Brand mark bottom right
-    ctx.fillStyle = SHARE_GOLD;
-    ctx.textAlign = 'right';
-    ctx.textBaseline = 'bottom';
-    ctx.font = _font(_shareBodyFont(700), 24);
-    ctx.fillText('@ChelseaVotingBot', W - 60, H - 60);
-}
-
-/* ── Variant C: Stats Vertical 9:16 ────────────────────────────── */
-async function drawCardStats(ctx, data, W, H) {
-    var bg = ctx.createLinearGradient(0, 0, 0, H);
-    bg.addColorStop(0, '#0a1f4d');
-    bg.addColorStop(0.45, '#062052');
-    bg.addColorStop(1, '#0a1628');
-    ctx.fillStyle = bg;
-    ctx.fillRect(0, 0, W, H);
-
-    // Subtle pitch grid
-    ctx.strokeStyle = 'rgba(255,255,255,0.04)';
-    ctx.lineWidth = 1;
-    for (var gy = 0; gy < H; gy += 80) {
-        ctx.beginPath();
-        ctx.moveTo(0, gy);
-        ctx.lineTo(W, gy);
-        ctx.stroke();
-    }
-
-    var stats = data.my || {};
-    var statsBlock = data.stats || {};
-
-    // Header: avatar + name + handle
-    var avatarImg = null;
-    try { avatarImg = await _loadImage(stats.telegram_photo_url); } catch (e) { avatarImg = null; }
-    _drawAvatarCircle(ctx, avatarImg, 140, 200, 90, {
-        fallbackName: (stats.first_name || '') + ' ' + (stats.last_name || ''),
-    });
-    ctx.fillStyle = '#fff';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'top';
-    ctx.font = _font(_shareDisplayFont(800), 64);
-    var fullName = ((stats.first_name || '') + ' ' + (stats.last_name || '')).trim() || '—';
-    if (fullName.length > 18) fullName = fullName.slice(0, 17) + '…';
-    ctx.fillText(fullName, 260, 130);
-    ctx.fillStyle = SHARE_GOLD_LIGHT;
-    ctx.font = _font(_shareBodyFont(600), 36);
-    ctx.fillText(stats.username ? '@' + stats.username : (stats.custom_id || stats.auto_id || ''), 260, 220);
-
-    // Title: "Мои оценки vs ..."
-    ctx.fillStyle = SHARE_GOLD;
-    ctx.font = _font(_shareDisplayFont(800), 56);
-    ctx.fillText('МОИ ОЦЕНКИ', 60, 360);
-    ctx.fillStyle = '#fff';
-    ctx.font = _font(_shareBodyFont(600), 34);
-    var titleText = (data.poll && data.poll.title) || '';
-    ctx.fillText(titleText.slice(0, 30), 60, 432);
-
-    // Top 3 of my ratings
-    var rated = (data.lineup || []).filter(function (p) { return p.my_rating != null; });
-    rated.sort(function (a, b) { return b.my_rating - a.my_rating; });
-    var top3 = rated.slice(0, 3);
-
-    // Preload photos
-    var photos = await Promise.all(top3.map(function (p) {
-        return _loadImage(p.photo_url).catch(function () { return null; });
-    }));
-
-    var rankColors = [SHARE_GOLD, '#c0c0c0', '#cd7f32'];
-    var startY = 540;
-    var rowH = 200;
-    top3.forEach(function (p, i) {
-        var y = startY + i * rowH;
-        // Rank circle
-        ctx.fillStyle = rankColors[i];
-        ctx.beginPath();
-        ctx.arc(110, y + rowH / 2 - 20, 50, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = '#0a1628';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.font = _font(_shareDisplayFont(900), 64);
-        ctx.fillText(String(i + 1), 110, y + rowH / 2 - 18);
-
-        // Photo
-        var photoSize = 140;
-        _drawPlayerPhoto(ctx, photos[i], 200, y + (rowH - photoSize) / 2 - 20, photoSize, {
-            desaturate: false, radius: 16, fallbackName: p.name,
-        });
-
-        // Name
-        ctx.fillStyle = '#fff';
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'middle';
-        ctx.font = _font(_shareDisplayFont(800), 56);
-        var nm = p.name || '';
-        if (nm.length > 16) nm = nm.slice(0, 15) + '…';
-        ctx.fillText(nm, 370, y + rowH / 2 - 30);
-
-        // Rating
-        ctx.fillStyle = SHARE_GOLD;
-        ctx.font = _font(_shareDisplayFont(900), 80);
-        ctx.textAlign = 'right';
-        var lbl = Number(p.my_rating) % 1 === 0 ? String(p.my_rating) : Number(p.my_rating).toFixed(1);
-        ctx.fillText(lbl, W - 60, y + rowH / 2 - 25);
-    });
-
-    // Stat strip near bottom
-    var stripY = H - 360;
-    ctx.fillStyle = 'rgba(0,0,0,0.35)';
-    _roundRect(ctx, 60, stripY, W - 120, 200, 24);
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(219,161,17,0.5)';
-    ctx.lineWidth = 2;
-    _roundRect(ctx, 60, stripY, W - 120, 200, 24);
-    ctx.stroke();
-
-    var cells = [
-        { label: 'XP', value: String(statsBlock.total_xp || 0) },
-        { label: 'СЕРИЯ', value: String(statsBlock.current_streak || 0) },
-        { label: 'ВСЕГО ГОЛОСОВ', value: String(stats.total_votes || 0) },
-    ];
-    var cellW = (W - 120) / cells.length;
-    cells.forEach(function (c, i) {
-        var cx = 60 + i * cellW + cellW / 2;
-        ctx.fillStyle = SHARE_GOLD;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'top';
-        ctx.font = _font(_shareDisplayFont(900), 80);
-        ctx.fillText(c.value, cx, stripY + 30);
-        ctx.fillStyle = 'rgba(255,255,255,0.7)';
-        ctx.font = _font(_shareBodyFont(600), 26);
-        ctx.fillText(c.label, cx, stripY + 130);
-    });
-
-    // Brand mark
-    ctx.fillStyle = SHARE_GOLD;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'bottom';
-    ctx.font = _font(_shareBodyFont(700), 30);
-    ctx.fillText('@ChelseaVotingBot', W / 2, H - 60);
-}
-
-/* ── Render dispatch ─────────────────────────────────────────────── */
-async function _renderShareCard(variant, data) {
-    var dims = (variant === 'C') ? { w: 1080, h: 1920 } : { w: 1080, h: 1080 };
-    var canvas = document.createElement('canvas');
-    canvas.width = dims.w;
-    canvas.height = dims.h;
-    var ctx = canvas.getContext('2d');
-    if (variant === 'A') await drawCardLineup(ctx, data, dims.w, dims.h);
-    else if (variant === 'B') await drawCardMvp(ctx, data, dims.w, dims.h);
-    else await drawCardStats(ctx, data, dims.w, dims.h);
-    return canvas;
-}
-
-/* ── Picker modal ─────────────────────────────────────────────── */
-async function openShareCardPicker(pollId) {
-    toast(t('share.downloading'));
-    var data;
-    try {
-        data = await api('/api/share/' + encodeURIComponent(pollId));
-        if (!data.success) throw new Error('share data fetch failed');
-    } catch (e) {
-        toast(t('common.error'));
-        return;
-    }
-
-    // Build the modal scaffold
-    var overlay = document.createElement('div');
-    overlay.className = 'share-modal-overlay';
-    overlay.innerHTML =
-        '<div class="share-modal">' +
-        '  <div class="share-modal-header">' +
-        '    <h3>' + (t('share.pick_variant') || 'Выбери дизайн') + '</h3>' +
-        '    <button class="share-modal-close" aria-label="close">\u2716</button>' +
-        '  </div>' +
-        '  <div class="share-variants">' +
-        '    <div class="share-variant" data-variant="A"><div class="share-variant-canvas"></div><div class="share-variant-label">' + (t('share.variant_a') || 'A — Состав') + '</div></div>' +
-        '    <div class="share-variant" data-variant="B"><div class="share-variant-canvas"></div><div class="share-variant-label">' + (t('share.variant_b') || 'B — MVP') + '</div></div>' +
-        '    <div class="share-variant" data-variant="C"><div class="share-variant-canvas"></div><div class="share-variant-label">' + (t('share.variant_c') || 'C — Stories') + '</div></div>' +
-        '  </div>' +
-        '</div>';
-    document.body.appendChild(overlay);
-    overlay.querySelector('.share-modal-close').addEventListener('click', function () {
-        overlay.remove();
-    });
-    overlay.addEventListener('click', function (e) {
-        if (e.target === overlay) overlay.remove();
-    });
-
-    // Render thumbnails (smaller canvases). Use the same draw functions
-    // — they're size-parameterized.
-    var thumbDims = { w: 320, h: 320 };
-    var thumbDimsTall = { w: 240, h: 426 };
-    var slots = overlay.querySelectorAll('.share-variant');
-    for (var i = 0; i < slots.length; i++) {
-        (function (slot) {
-            var v = slot.getAttribute('data-variant');
-            var dims = (v === 'C') ? thumbDimsTall : thumbDims;
-            var c = document.createElement('canvas');
-            c.width = dims.w;
-            c.height = dims.h;
-            var cx = c.getContext('2d');
-            var fn = (v === 'A') ? drawCardLineup : (v === 'B') ? drawCardMvp : drawCardStats;
-            fn(cx, data, dims.w, dims.h).then(function () {
-                slot.querySelector('.share-variant-canvas').appendChild(c);
-            }).catch(function () {});
-            slot.addEventListener('click', function () {
-                _renderAndShare(v, data);
-                overlay.remove();
-            });
-        })(slots[i]);
-    }
-}
-
-async function _renderAndShare(variant, data) {
-    toast(t('share.downloading'));
-    var canvas;
-    try {
-        canvas = await _renderShareCard(variant, data);
-    } catch (e) {
-        toast(t('common.error'));
-        return;
-    }
-    canvas.toBlob(function (blob) {
-        if (!blob) { toast(t('common.error')); return; }
-        var fileName = 'chelsea-' + variant.toLowerCase() + '.png';
-        if (navigator.share && navigator.canShare) {
-            var file = new File([blob], fileName, { type: 'image/png' });
-            var sd = { files: [file], title: 'Chelsea Voting' };
-            if (navigator.canShare(sd)) {
-                navigator.share(sd).then(function () { toast(t('share.card_ready')); })
-                                   .catch(function () { downloadBlob(blob); });
-                return;
-            }
-        }
-        downloadBlob(blob);
-    }, 'image/png');
-}
