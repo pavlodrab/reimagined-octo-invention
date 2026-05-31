@@ -1850,3 +1850,134 @@ html[data-user-bg="1"] body::after {
     color: var(--text);
     background: var(--bg-card-hover);
 }
+
+
+/* ── Bonds (love / hate progression) ─────────────────────────────
+   Lives in the profile tab right after the awards block. Two stacked
+   groups: love (gold border, gold glow) and hate (red border, charcoal
+   glow). Each card has a square photo, name, tier label and a thin
+   progress bar showing how close the user is to the next threshold.   */
+.bonds-section {
+    background: var(--bg-card);
+    border-radius: var(--radius);
+    padding: 16px;
+    margin-top: 16px;
+    border: 1px solid rgba(219, 161, 17, 0.18);
+}
+.bonds-section h3 {
+    color: var(--gold);
+    font-family: var(--font-display);
+    font-size: 1rem;
+    margin-bottom: 12px;
+    letter-spacing: 0.4px;
+}
+.bonds-group { margin-top: 10px; }
+.bonds-group + .bonds-group { margin-top: 18px; }
+.bonds-group-heading {
+    color: var(--text);
+    font-weight: 600;
+    font-size: 0.85rem;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.bond-glyph {
+    display: inline-flex;
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.85rem;
+    color: #fff;
+}
+.bond-glyph.love { background: linear-gradient(140deg, #d8344d, #ff6b8a); }
+.bond-glyph.hate { background: linear-gradient(140deg, #2c3140, #4a4f5d); }
+
+.bonds-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 10px;
+}
+.bond-card {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px;
+    background: var(--bg);
+    border-radius: 12px;
+    border: 1px solid transparent;
+    transition: transform 0.15s, box-shadow 0.15s;
+}
+.bond-card:hover { transform: translateY(-1px); }
+.bond-love { border-color: rgba(219, 161, 17, 0.35); }
+.bond-love.bond-tier-3 { border-color: rgba(219, 161, 17, 0.65); box-shadow: 0 0 0 1px rgba(219, 161, 17, 0.3) inset; }
+.bond-love.bond-tier-4 {
+    border-color: var(--gold);
+    box-shadow: 0 0 14px rgba(219, 161, 17, 0.35), 0 0 0 1px rgba(219, 161, 17, 0.5) inset;
+}
+.bond-hate { border-color: rgba(217, 70, 70, 0.35); }
+.bond-hate.bond-tier-3 { border-color: rgba(217, 70, 70, 0.65); box-shadow: 0 0 0 1px rgba(217, 70, 70, 0.3) inset; }
+.bond-hate.bond-tier-4 {
+    border-color: #d94646;
+    box-shadow: 0 0 14px rgba(217, 70, 70, 0.35), 0 0 0 1px rgba(217, 70, 70, 0.5) inset;
+}
+
+.bond-photo {
+    width: 48px;
+    height: 48px;
+    border-radius: 10px;
+    object-fit: cover;
+    flex-shrink: 0;
+    background: var(--bg-card);
+}
+.bond-photo-fallback {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--gold);
+    font-weight: 700;
+    font-family: var(--font-display);
+    font-size: 1.2rem;
+}
+.bond-info { flex: 1; min-width: 0; }
+.bond-name {
+    color: var(--text);
+    font-weight: 600;
+    font-size: 0.85rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.bond-tier {
+    color: var(--gold);
+    font-family: var(--font-display);
+    font-size: 0.8rem;
+    letter-spacing: 0.3px;
+}
+.bond-hate .bond-tier { color: #ff8b8b; }
+.bond-count {
+    color: var(--text-dim);
+    font-size: 0.7rem;
+    margin-top: 2px;
+}
+.bond-progress {
+    margin-top: 6px;
+    height: 4px;
+    background: rgba(255, 255, 255, 0.06);
+    border-radius: 4px;
+    overflow: hidden;
+}
+.bond-progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #DBA111, #f6d365);
+    border-radius: 4px;
+    transition: width 0.3s ease;
+}
+.bond-hate .bond-progress-fill { background: linear-gradient(90deg, #d94646, #ff8b8b); }
+.bond-progress-meta {
+    font-size: 0.65rem;
+    color: var(--text-dim);
+    margin-top: 2px;
+}
+.bond-progress-meta.bond-maxed { color: var(--gold); font-weight: 700; }

@@ -1,7 +1,7 @@
 """
 app.py  —  Flask backend for Chelsea Voting Mini App
 """
-import os, json, time, uuid, hashlib, hmac, html, atexit, threading, queue, math
+import os, json, time, uuid, hashlib, hmac, html, atexit, threading, queue, math, re
 from urllib.parse import parse_qs
 
 from flask import Flask, request, jsonify, send_from_directory, abort, g, has_request_context
@@ -1842,7 +1842,8 @@ def api_profile(uid):
     xp_data = get_user_xp(uid)
     streak_data = get_user_streak(uid)
     awards = get_user_awards(uid)
-    return jsonify({"success": True, "profile": {**prof, **stats, "xp_data": xp_data, "streak_data": streak_data, "awards": awards}})
+    bonds = get_player_bonds(uid)
+    return jsonify({"success": True, "profile": {**prof, **stats, "xp_data": xp_data, "streak_data": streak_data, "awards": awards, "bonds": bonds}})
 
 
 @app.get("/api/profile/me")
@@ -2229,31 +2230,18 @@ def api_set_notification_prefs():
 
 @app.post("/api/referral")
 def api_referral():
-    """Register a referral."""
-    uid = get_current_user_id()
-    if not uid:
-        return jsonify({"success": False, "error": "unauthorized"}), 401
-    body = request.get_json(force=True)
-    referrer_code = body.get('referrer_code', '')
-    if not referrer_code:
-        return jsonify({"success": False, "error": "missing referrer_code"}), 400
-    # Resolve referrer_code to a user_id (could be custom_id or auto_id)
-    conn = get_connection()
-    try:
-        referrer = conn.execute(
-            'SELECT user_id FROM profiles WHERE custom_id = ? OR auto_id = ?',
-            (referrer_code, referrer_code)
-        ).fetchone()
-    finally:
-        conn.close()
-    if not referrer:
-        return jsonify({"success": False, "error": "referrer not found"}), 404
-    referrer_id = referrer['user_id']
-    if referrer_id == uid:
-        return jsonify({"success": False, "error": "cannot refer yourself"}), 400
-    add_referral(referrer_id, uid)
-    add_xp(referrer_id, 30, 'referral')
-    return jsonify({"success": True, "referrer_id": referrer_id})
+    """Referral feature is disabled — kept as a 410 stub so any in-flight
+    clients with cached UI get a clean shutdown signal instead of a 500.
+
+    The referral flow was removed because the redemption logic never
+    fired in production (links opened the bot but the referrer_code never
+    propagated through Telegram start params). Re-enable by wiring start
+    param handling in bot.py and reverting this stub.
+    """
+    return jsonify({
+        "success": False,
+        "error": "referral program disabled",
+    }), 410
 
 
 @app.get("/api/xp/me")
@@ -3256,6 +3244,80 @@ def api_admin_list_polls():
     _admin_check()
     limit = request.args.get("limit", 20, type=int)
     return jsonify({"success": True, "polls": list_polls(limit=limit)})
+
+
+@app.post("/api/admin/profile/custom-id")
+@limiter.limit("20 per minute")
+def api_admin_set_custom_id():
+    """Owner / admin tool: assign or clear a custom_id for any user.
+
+    Body: { "user_id": 12345, "custom_id": "drakelovc" } — set custom_id.
+          { "user_id": 12345, "custom_id": "" }          — clear it.
+
+    custom_id is unique across profiles, so we 409 on collision instead
+    of 500'ing on the UNIQUE constraint. Whitespace is trimmed; common
+    URL-unsafe characters get rejected upfront so links keep working.
+    """
+    admin_id = _admin_check()
+    body = request.get_json(force=True) or {}
+    try:
+        target_uid = int(body.get("user_id") or 0)
+    except (TypeError, ValueError):
+        target_uid = 0
+    if target_uid <= 0:
+        return jsonify({"success": False, "error": "user_id required"}), 400
+    custom_id = (body.get("custom_id") or "").strip()
+    # Empty string => clear. Otherwise validate.
+    if custom_id:
+        if len(custom_id) > 32:
+            return jsonify({"success": False, "error": "custom_id too long (max 32)"}), 400
+        # Allow only chars that work in a profile URL slug.
+        if not re.fullmatch(r'[A-Za-z0-9._\-]{2,32}', custom_id):
+            return jsonify({
+                "success": False,
+                "error": "custom_id must be 2-32 chars: letters, digits, . _ -",
+            }), 400
+
+    conn = get_connection()
+    try:
+        # Make sure the target profile exists — if the admin types a stale
+        # ID we'd otherwise silently UPDATE 0 rows and return success.
+        target_row = conn.execute(
+            'SELECT user_id, custom_id FROM profiles WHERE user_id = ?',
+            (target_uid,),
+        ).fetchone()
+        if not target_row:
+            return jsonify({"success": False, "error": "profile not found"}), 404
+
+        if custom_id:
+            collision = conn.execute(
+                'SELECT user_id FROM profiles WHERE custom_id = ? AND user_id != ?',
+                (custom_id, target_uid),
+            ).fetchone()
+            if collision:
+                return jsonify({
+                    "success": False,
+                    "error": "custom_id already taken",
+                    "taken_by_user_id": collision['user_id'],
+                }), 409
+            conn.execute(
+                'UPDATE profiles SET custom_id = ? WHERE user_id = ?',
+                (custom_id, target_uid),
+            )
+        else:
+            conn.execute(
+                'UPDATE profiles SET custom_id = NULL WHERE user_id = ?',
+                (target_uid,),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    add_log(admin_id, "set_custom_id",
+            target_user_id=target_uid,
+            details={"custom_id": custom_id or None,
+                     "previous": target_row['custom_id']})
+    return jsonify({"success": True, "user_id": target_uid, "custom_id": custom_id or None})
 
 
 @app.post("/api/admin/background/add")

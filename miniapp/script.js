@@ -2229,6 +2229,11 @@ async function renderProfileTab() {
             '<div class="player-meta">' + t('awards.no_awards') + '</div></div>';
     }
 
+    // Bonds section: love/hate progression with players. Computed on
+    // the backend (db.get_player_bonds) from the user's full vote
+    // history; we only render here.
+    var bondsHtml = renderBondsSection(state.myProfile && state.myProfile.bonds);
+
     // Avatar source: ONLY Telegram profile photo. The chelsea-themed emoji
     // grid was removed — TG photo is the single source of truth, with a
     // graceful initials fallback for users who didn't grant Telegram photo
@@ -2245,6 +2250,9 @@ async function renderProfileTab() {
 
         <!-- Awards Display -->
         ${awardsHtml}
+
+        <!-- Player bonds (love/hate progression) -->
+        ${bondsHtml}
 
         <!-- Profile hero (avatar + name + ID badge) -->
         <div class="profile-hero">
@@ -2295,21 +2303,108 @@ async function renderProfileTab() {
             <button class="btn-secondary" onclick="compareFriend()">${t('social.compare_btn')}</button>
             <div id="compare-result"></div>
         </div>
-
-        <!-- Referral -->
-        <div class="referral-section">
-            <h3>${t('social.referral')}</h3>
-            <div class="player-meta mb-8">${t('social.referral_code')}</div>
-            <div class="referral-code">${p.custom_id || p.auto_id || state.userId}</div>
-            <div style="text-align:center;margin-top:10px;">
-                <button class="copy-btn" onclick="copyReferral()">${t('social.copy_link')}</button>
-            </div>
-            <div class="player-meta mt-8" style="text-align:center;">${t('social.referrals_count')}: <span id="referral-count">0</span></div>
-        </div>
     `;
 
     // Load and render heatmap
     loadHeatmap();
+}
+
+/* ═══════════════════════════════════════════════════
+   Bonds — render the love/hate progression in profile
+   ═══════════════════════════════════════════════════
+   Backend (db.get_player_bonds) returns:
+     { love: [{ player_id, player_name, photo_url, count, tier }, …],
+       hate: [...same shape...] }
+   Each `tier` is 1..4 mapped to thresholds 5/10/25/50.
+   We render two stacked rows of badges, gold for love and red-ish for
+   hate, with a "next tier" tip when the user is between tiers.        */
+var BOND_THRESHOLDS = [5, 10, 25, 50];
+
+function _bondTierLabel(kind, tier) {
+    return t('bonds.' + kind + '_tier_' + tier) || '';
+}
+
+/* Pluralise the "N times" counter using simple ru/en rules. ru has
+   three forms (1 раз / 2-4 раза / 5+ раз); en collapses to one/many.   */
+function _bondCounter(n) {
+    var lang = (typeof getLang === 'function' ? getLang() : 'ru');
+    if (lang === 'ru') {
+        var n100 = n % 100;
+        var n10 = n % 10;
+        if (n100 >= 11 && n100 <= 14) return t('bonds.counter_many');
+        if (n10 === 1) return t('bonds.counter_one');
+        if (n10 >= 2 && n10 <= 4) return t('bonds.counter_few');
+        return t('bonds.counter_many');
+    }
+    return n === 1 ? t('bonds.counter_one') : t('bonds.counter_many');
+}
+
+/* Find the next un-reached threshold so we can show "5 more to next
+   tier" hints. Returns null when the user is already at the cap.       */
+function _nextThreshold(count) {
+    for (var i = 0; i < BOND_THRESHOLDS.length; i++) {
+        if (count < BOND_THRESHOLDS[i]) return BOND_THRESHOLDS[i];
+    }
+    return null;
+}
+
+function _renderBondCard(kind, item) {
+    var photoUrl = item.photo_url || '';
+    var initial = (item.player_name || '?')[0].toUpperCase();
+    var photoHtml = photoUrl
+        ? '<img class="bond-photo" src="' + escapeHtml(photoUrl) + '" alt="" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement(\'div\'),{className:\'bond-photo bond-photo-fallback\',textContent:\'' + escapeHtml(initial) + '\'}))">'
+        : '<div class="bond-photo bond-photo-fallback">' + escapeHtml(initial) + '</div>';
+    var tierLabel = _bondTierLabel(kind, item.tier);
+    var nextThr = _nextThreshold(item.count);
+    var progressLine = '';
+    if (nextThr) {
+        var pct = Math.min(100, Math.round(item.count * 100 / nextThr));
+        progressLine = '<div class="bond-progress" title="' + (nextThr - item.count) + '">' +
+            '<div class="bond-progress-fill" style="width:' + pct + '%"></div></div>' +
+            '<div class="bond-progress-meta">' + item.count + ' / ' + nextThr + '</div>';
+    } else {
+        progressLine = '<div class="bond-progress-meta bond-maxed">' + item.count + ' \u2605</div>';
+    }
+    return '<div class="bond-card bond-' + kind + ' bond-tier-' + item.tier + '">' +
+        photoHtml +
+        '<div class="bond-info">' +
+            '<div class="bond-name">' + escapeHtml(item.player_name || '') + '</div>' +
+            '<div class="bond-tier">' + escapeHtml(tierLabel) + '</div>' +
+            '<div class="bond-count">' + item.count + ' ' + _bondCounter(item.count) + '</div>' +
+            progressLine +
+        '</div>' +
+    '</div>';
+}
+
+function renderBondsSection(bonds) {
+    var love = (bonds && bonds.love) || [];
+    var hate = (bonds && bonds.hate) || [];
+    if (!love.length && !hate.length) {
+        return '<div class="bonds-section">' +
+            '<h3>\uD83D\uDC95 ' + t('bonds.title') + '</h3>' +
+            '<div class="player-meta">' + t('bonds.no_bonds') + '</div>' +
+        '</div>';
+    }
+    var html = '<div class="bonds-section">' +
+        '<h3>\uD83D\uDC95 ' + t('bonds.title') + '</h3>';
+    if (love.length) {
+        html += '<div class="bonds-group">' +
+            '<div class="bonds-group-heading"><span class="bond-glyph love">\u2665</span>' +
+            ' ' + t('bonds.love_heading') + '</div>' +
+            '<div class="bonds-grid">';
+        for (var i = 0; i < love.length; i++) html += _renderBondCard('love', love[i]);
+        html += '</div></div>';
+    }
+    if (hate.length) {
+        html += '<div class="bonds-group">' +
+            '<div class="bonds-group-heading"><span class="bond-glyph hate">\u2620</span>' +
+            ' ' + t('bonds.hate_heading') + '</div>' +
+            '<div class="bonds-grid">';
+        for (var i = 0; i < hate.length; i++) html += _renderBondCard('hate', hate[i]);
+        html += '</div></div>';
+    }
+    html += '</div>';
+    return html;
 }
 
 async function loadHeatmap() {
@@ -2395,21 +2490,6 @@ async function compareFriend() {
         }
     } catch (e) {
         container.innerHTML = '<div class="player-meta">' + t('common.error') + '</div>';
-    }
-}
-
-function copyReferral() {
-    var p = state.myProfile || {};
-    var code = p.custom_id || p.auto_id || String(state.userId);
-    var text = t('social.referral_text') + ' ' + code;
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(function() {
-            toast(t('social.copied'));
-        }).catch(function() {
-            toast(t('common.error'));
-        });
-    } else {
-        toast(t('common.error'));
     }
 }
 
@@ -2805,6 +2885,7 @@ async function renderAdminTab() {
         ${renderAdminChannel()}
         ${renderAdminPolls()}
         ${renderAdminAdmins()}
+        ${renderAdminCustomId()}
         ${renderAdminVotesView()}
         ${renderAdminVoteAdjust()}
         ${renderAdminResetVote()}
@@ -3032,6 +3113,25 @@ function renderAdminAdmins() {
         </div>`;
 }
 
+function renderAdminCustomId() {
+    return `
+        <div class="admin-section">
+            <h3>\uD83D\uDD11 ${t('admin.custom_id.heading')}</h3>
+            <p class="player-meta mb-8">${t('admin.custom_id.hint')}</p>
+            <div class="grid-2">
+                <div class="form-group">
+                    <label>${t('admin.custom_id.user_id')}</label>
+                    <input type="number" id="cid-user-id" placeholder="123456789">
+                </div>
+                <div class="form-group">
+                    <label>${t('admin.custom_id.custom_id')}</label>
+                    <input type="text" id="cid-custom-id" placeholder="drakelovc" maxlength="32">
+                </div>
+            </div>
+            <button class="btn-primary mt-8" onclick="adminSetCustomId()">${t('admin.custom_id.apply')}</button>
+        </div>`;
+}
+
 function renderAdminVoteAdjust() {
     return `
         <div class="admin-section">
@@ -3177,6 +3277,40 @@ async function adminRemoveAdmin(uid) {
         await api('/api/admin/admins/remove', { method: 'POST', body: JSON.stringify({ user_id: uid }) });
         toast(t('admin.admins.removed_toast'));
         await renderAdminTab();
+    } catch (e) { toast(t('common.error')); }
+}
+
+async function adminSetCustomId() {
+    // Owner / admin tool: assign or clear custom_id for any user. Empty
+    // input clears the field. Validation happens server-side too — we
+    // pre-validate here only to surface a friendlier toast immediately.
+    const uid = parseInt((document.getElementById('cid-user-id') || {}).value);
+    const customId = ((document.getElementById('cid-custom-id') || {}).value || '').trim();
+    if (!uid || isNaN(uid)) { toast(t('admin.custom_id.fill_user_id')); return; }
+    if (customId && !/^[A-Za-z0-9._\-]{2,32}$/.test(customId)) {
+        toast(t('admin.custom_id.invalid_format'));
+        return;
+    }
+    try {
+        const data = await api('/api/admin/profile/custom-id', {
+            method: 'POST',
+            body: JSON.stringify({ user_id: uid, custom_id: customId }),
+        });
+        if (data.success) {
+            toast(t(customId ? 'admin.custom_id.applied_toast' : 'admin.custom_id.cleared_toast'));
+            const idEl = document.getElementById('cid-user-id');
+            const valEl = document.getElementById('cid-custom-id');
+            if (idEl) idEl.value = '';
+            if (valEl) valEl.value = '';
+        } else {
+            // Map known errors to localized toasts; everything else falls
+            // through to the generic message so the user at least knows
+            // something failed.
+            if (data.error === 'custom_id already taken') toast(t('admin.custom_id.taken_toast'));
+            else if (data.error === 'profile not found') toast(t('admin.custom_id.profile_not_found'));
+            else if (String(data.error || '').indexOf('custom_id must be') === 0) toast(t('admin.custom_id.invalid_format'));
+            else toast(data.error || t('common.error'));
+        }
     } catch (e) { toast(t('common.error')); }
 }
 

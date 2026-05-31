@@ -164,6 +164,19 @@ var TRANSLATIONS = {
                 removed_toast: 'Админ удалён',
                 enter_id: 'Введите User ID'
             },
+            custom_id: {
+                heading: 'Кастомный ID юзера',
+                hint: 'Назначить или очистить custom_id любому пользователю. Пусто — снять.',
+                user_id: 'User ID',
+                custom_id: 'Новый custom_id (или пусто, чтобы очистить)',
+                apply: 'Применить',
+                applied_toast: 'Custom ID обновлён',
+                cleared_toast: 'Custom ID очищен',
+                taken_toast: 'Этот ID уже занят',
+                fill_user_id: 'Введите User ID',
+                profile_not_found: 'Профиль не найден',
+                invalid_format: 'ID: 2-32 символа, буквы/цифры/. _ -'
+            },
             vote_adjust: {
                 heading: 'Корректировка голосов',
                 poll_id: 'Poll ID',
@@ -499,6 +512,29 @@ var TRANSLATIONS = {
             earned: 'Получено'
         },
 
+        // Player bonds (love / hate progression)
+        bonds: {
+            title: 'Связи с игроками',
+            love_heading: 'Влюблён в игрока',
+            hate_heading: 'Хейтер игрока',
+            no_bonds: 'Поголосуй больше — и тут появятся твои фавориты и кормы.',
+            counter_one: 'раз',
+            counter_few: 'раза',
+            counter_many: 'раз',
+            // Love tiers (1..4) — affection grows with the count
+            love_tier_1: 'Подсос',
+            love_tier_2: 'Любитель',
+            love_tier_3: 'Жена',
+            love_tier_4: 'Муж',
+            // Hate tiers (1..4) — escalating salt
+            hate_tier_1: 'Корм',
+            hate_tier_2: 'Хейтер',
+            hate_tier_3: 'Ненавистник',
+            hate_tier_4: 'Враг №1',
+            tip_love: 'Поставь {threshold} макс. оценок одному игроку, чтобы получить следующий ранг.',
+            tip_hate: 'Поставь {threshold} нулей одному игроку, чтобы получить следующий ранг.'
+        },
+
         // FPL
         fpl: {
             title: 'Очки FPL',
@@ -695,6 +731,19 @@ var TRANSLATIONS = {
                 added_toast: 'Admin added!',
                 removed_toast: 'Admin removed',
                 enter_id: 'Enter User ID'
+            },
+            custom_id: {
+                heading: 'User custom ID',
+                hint: 'Assign or clear a custom_id for any user. Leave empty to clear.',
+                user_id: 'User ID',
+                custom_id: 'New custom_id (or empty to clear)',
+                apply: 'Apply',
+                applied_toast: 'Custom ID updated',
+                cleared_toast: 'Custom ID cleared',
+                taken_toast: 'That ID is already taken',
+                fill_user_id: 'Enter a User ID',
+                profile_not_found: 'Profile not found',
+                invalid_format: 'ID: 2-32 chars, letters/digits/. _ -'
             },
             vote_adjust: {
                 heading: 'Vote Adjustment',
@@ -1030,6 +1079,27 @@ var TRANSLATIONS = {
             month_label: 'Month',
             no_awards: 'No awards yet',
             earned: 'Earned'
+        },
+
+        // Player bonds (love / hate progression)
+        bonds: {
+            title: 'Player bonds',
+            love_heading: 'In love with',
+            hate_heading: 'Hating on',
+            no_bonds: 'Vote more — your favourites and punching bags will show up here.',
+            counter_one: 'time',
+            counter_few: 'times',
+            counter_many: 'times',
+            love_tier_1: 'Fanboy',
+            love_tier_2: 'Diehard',
+            love_tier_3: 'Wife',
+            love_tier_4: 'Husband',
+            hate_tier_1: 'Punching bag',
+            hate_tier_2: 'Hater',
+            hate_tier_3: 'Loather',
+            hate_tier_4: 'Nemesis',
+            tip_love: 'Give {threshold} max-rating votes to one player to reach the next tier.',
+            tip_hate: 'Give {threshold} zeroes to one player to reach the next tier.'
         },
 
         // FPL

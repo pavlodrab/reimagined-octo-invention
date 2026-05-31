@@ -1843,6 +1843,132 @@ def get_all_awards(limit: int = 50) -> List[Dict]:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Player bonds (love / hate progression)
+#
+# A "bond" is a per-player relationship metric derived purely from a
+# user's voting history. We don't store it — we recompute on demand —
+# so it's always consistent with the underlying votes table even if a
+# user's votes get reset.
+#
+# A vote at the poll's max_rating counts as a "love" hit; a vote at 0
+# (or 1 if max is 1) counts as a "hate" hit. Anything in between is
+# neutral. We then bin the per-player counts into tiers:
+#
+#     LOVE  5 / 10 / 25 / 50  → подсос  / любитель  / жена         / муж
+#     HATE  5 / 10 / 25 / 50  → корм    / хейтер    / ненавистник  / враг
+#
+# Tier *labels* live in the i18n bundle on the client; the backend
+# only reports the numeric tier (1..4) and the count, plus the
+# player's display fields so the UI can render an avatar without
+# round-tripping a /api/players call.
+# ──────────────────────────────────────────────────────────────────────
+
+# Threshold list shared by love and hate. Index = tier - 1.
+_BOND_THRESHOLDS = [5, 10, 25, 50]
+
+
+def _bond_tier(count: int) -> int:
+    """Return tier (0..4). 0 means below the lowest threshold."""
+    tier = 0
+    for i, thr in enumerate(_BOND_THRESHOLDS):
+        if count >= thr:
+            tier = i + 1
+    return tier
+
+
+def get_player_bonds(user_id: int) -> Dict[str, List[Dict]]:
+    """Compute a user's love/hate bonds across every poll they've voted in.
+
+    Returns:
+        {
+          "love": [{ "player_id", "player_name", "photo_url", "count",
+                     "tier" }, ... sorted by count desc],
+          "hate": [... same shape ...]
+        }
+    """
+    conn = get_connection()
+    try:
+        # Pull every vote with the poll's max_rating so we can decide
+        # love vs hate per row regardless of poll-level scale changes.
+        rows = conn.execute('''
+            SELECT v.player_id, v.rating, COALESCE(p.max_rating, 10) AS max_rating
+            FROM votes v
+            JOIN polls p ON p.poll_id = v.poll_id
+            WHERE v.user_id = ?
+        ''', (user_id,)).fetchall()
+        if not rows:
+            return {"love": [], "hate": []}
+
+        love_counts: Dict[str, int] = {}
+        hate_counts: Dict[str, int] = {}
+        for r in rows:
+            pid = r['player_id']
+            rating = r['rating']
+            mx = r['max_rating'] or 10
+            if rating >= mx:
+                love_counts[pid] = love_counts.get(pid, 0) + 1
+            elif rating <= 0:
+                # max=1 polls collapse love/hate — treat 0 as hate only
+                # when there's room above. Otherwise skip (binary polls
+                # can't distinguish admiration from contempt).
+                if mx > 1:
+                    hate_counts[pid] = hate_counts.get(pid, 0) + 1
+
+        # Resolve player display fields. Same player_id may appear in
+        # multiple match rows; LIMIT 1 picks any non-null name.
+        all_pids = set(love_counts) | set(hate_counts)
+        if not all_pids:
+            return {"love": [], "hate": []}
+        # SQLite has a 999-parameter cap; chunk if a user somehow voted
+        # for a thousand distinct players (won't happen, but cheap).
+        info: Dict[str, Dict] = {}
+        chunk: List[str] = []
+        for pid in all_pids:
+            chunk.append(pid)
+            if len(chunk) == 500:
+                _fetch_player_display(conn, chunk, info)
+                chunk = []
+        if chunk:
+            _fetch_player_display(conn, chunk, info)
+
+        def _build(counts: Dict[str, int]) -> List[Dict]:
+            out = []
+            for pid, cnt in counts.items():
+                tier = _bond_tier(cnt)
+                if tier == 0:
+                    continue
+                inf = info.get(pid, {})
+                out.append({
+                    "player_id": pid,
+                    "player_name": inf.get('name') or pid,
+                    "photo_url": inf.get('photo_url') or '',
+                    "count": cnt,
+                    "tier": tier,
+                })
+            out.sort(key=lambda x: (-x['count'], x['player_name']))
+            return out
+
+        return {"love": _build(love_counts), "hate": _build(hate_counts)}
+    finally:
+        conn.close()
+
+
+def _fetch_player_display(conn, player_ids: List[str], dest: Dict[str, Dict]):
+    """Populate `dest` dict with name/photo for each player_id. Helper for
+    get_player_bonds — kept private so the SQL stays out of the public API."""
+    placeholders = ','.join(['?'] * len(player_ids))
+    rows = conn.execute(
+        f'SELECT player_id, name, photo_url FROM players '
+        f'WHERE player_id IN ({placeholders})',
+        player_ids,
+    ).fetchall()
+    for r in rows:
+        pid = r['player_id']
+        if pid not in dest:
+            dest[pid] = {'name': r['name'], 'photo_url': r['photo_url']}
+
+
+# ──────────────────────────────────────────────────────────────────────
 # FPL helpers
 # ──────────────────────────────────────────────────────────────────────
 
